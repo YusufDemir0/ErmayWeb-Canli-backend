@@ -1,0 +1,415 @@
+import { Response } from 'express';
+import crypto from 'crypto';
+import { prisma } from '../config/database';
+import { AuthenticatedRequest } from '../middlewares/auth.middleware';
+import { reserveStockAtomic, releaseStockAtomic } from '../services/stock.service';
+import { validateOrderStateTransition } from '../services/orderStateMachine.service';
+import { OrderStatus, PaymentMethod, PaymentStatus, InvoiceType } from '@prisma/client';
+import { calculateOrderFinancials, toKurus } from '../utils/financial';
+
+interface CartItemInput {
+  productId?: string;
+  product?: { id: string };
+  variantId?: string | null;
+  quantity: number;
+}
+
+export async function createOrder(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const userId = req.user?.userId;
+  const {
+    items,
+    shippingAddressId,
+    shippingAddress,
+    invoiceType,
+    tcKn,
+    companyTitle,
+    taxNo,
+    taxOffice,
+    paymentMethod,
+    couponCode,
+  } = req.body;
+
+  if (!items || items.length === 0) {
+    res.status(400).json({ success: false, message: 'Sipariş sepeti boş olamaz.' });
+    return;
+  }
+
+  if (!userId) {
+    res.status(401).json({ success: false, message: 'Sipariş vermek için giriş yapmalısınız.' });
+    return;
+  }
+
+  const stockItems = items.map((i: CartItemInput) => ({
+    productId: i.productId || i.product?.id,
+    variantId: i.variantId,
+    quantity: i.quantity,
+  }));
+
+  // 1. Stock Lock Atomic
+  try {
+    await reserveStockAtomic(stockItems);
+  } catch (stockError: unknown) {
+    const msg = stockError instanceof Error ? stockError.message : 'Stok rezervasyonu başarısız.';
+    res.status(409).json({ success: false, message: msg });
+    return;
+  }
+
+  // 2. Create Order with Server-Side Coupon & Price Calculation
+  try {
+    // Fetch DB Products first to calculate subtotal and prevent client price tampering
+    const itemCalculationInputs: Array<{ unitPrice: number; quantity: number; vatRate: number }> = [];
+    const orderItemsData: Array<{ productId: string; variantId: string | null; quantity: number; unitPrice: number; totalPrice: number }> = [];
+    let subTotalKurus = 0;
+
+    // Check address presence early to prevent runtime foreign key errors
+    let addressId = shippingAddressId;
+    const isUuid = typeof addressId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(addressId);
+    if (!isUuid) {
+      addressId = undefined;
+    }
+
+    if (!addressId && !shippingAddress) {
+      res.status(400).json({ success: false, message: 'Geçerli bir teslimat adresi seçilmeli veya girilmelidir.' });
+      return;
+    }
+
+    for (const item of items) {
+      const pId = item.productId || item.product?.id;
+      let dbProduct = pId ? await prisma.product.findUnique({ where: { id: pId } }) : null;
+
+      if (!dbProduct) {
+        // Strict Error: Do not guess or substitute products
+        res.status(400).json({
+          success: false,
+          message: `Sipariş edilmek istenen ürün (${pId || item.product?.name || 'Bilinmeyen'}) veritabanında bulunamadı veya satıştan kaldırılmıştır.`,
+        });
+        return;
+      }
+
+      const unitPrice = Number(item.product?.price || dbProduct.price);
+      const vatRate = dbProduct.vatRate ? Number(dbProduct.vatRate) : 0.20;
+
+      itemCalculationInputs.push({
+        unitPrice,
+        quantity: item.quantity,
+        vatRate,
+      });
+
+      subTotalKurus += toKurus(unitPrice * item.quantity);
+
+      orderItemsData.push({
+        productId: dbProduct.id,
+        variantId: item.variantId || null,
+        quantity: item.quantity,
+        unitPrice,
+        totalPrice: Number((unitPrice * item.quantity).toFixed(2)),
+      });
+    }
+
+    let calculatedCouponKurus = 0;
+    let couponIdToIncrement: string | null = null;
+
+    if (couponCode && typeof couponCode === 'string' && couponCode.trim().length > 0) {
+      const dbCoupon = await prisma.coupon.findUnique({
+        where: { code: couponCode.trim().toUpperCase() },
+      });
+
+      if (dbCoupon && dbCoupon.isActive) {
+        let isExpired = false;
+        if (dbCoupon.expiryDate) {
+          const exp = new Date(dbCoupon.expiryDate);
+          exp.setHours(23, 59, 59, 999);
+          isExpired = exp.getTime() < Date.now();
+        }
+
+        if (!isExpired) {
+          if (!dbCoupon.maxUses || dbCoupon.usedCount < dbCoupon.maxUses) {
+            if (dbCoupon.discountType === 'percentage') {
+              calculatedCouponKurus = Math.round((subTotalKurus * Number(dbCoupon.discount)) / 100);
+            } else {
+              calculatedCouponKurus = toKurus(Number(dbCoupon.discount || dbCoupon.discountAmount));
+            }
+            couponIdToIncrement = dbCoupon.id;
+          }
+        }
+      }
+    }
+
+    if (!addressId && shippingAddress) {
+      const createdAddr = await prisma.userAddress.create({
+        data: {
+          userId,
+          title: shippingAddress.title || 'Teslimat Adresi',
+          fullName: shippingAddress.fullName || 'Değerli Müşterimiz',
+          phone: shippingAddress.phone || '',
+          city: shippingAddress.city || 'İstanbul',
+          district: shippingAddress.district || 'Ümraniye',
+          addressLine: shippingAddress.addressLine || 'Modoko',
+          zipCode: shippingAddress.zipCode || '34000',
+        },
+      });
+      addressId = createdAddr.id;
+    }
+
+    // Calculate Integer Kurus Financials
+    const financials = calculateOrderFinancials(itemCalculationInputs, calculatedCouponKurus);
+
+    // Cryptographically secure collision-resistant sequential Order & Invoice IDs
+    const year = new Date().getFullYear();
+    const epochSuffix = Math.floor(Date.now() / 1000).toString().slice(-5);
+    const entropy = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const orderNumber = `ORD-${year}${epochSuffix}-${entropy}`;
+    const invoiceNumber = `ERM-${year}${epochSuffix}-${entropy}`;
+
+    // Execute Order Creation & Coupon Increment in Prisma Atomic Transaction
+    // All orders start as PENDING_PAYMENT until verified by payment gateway or bank receipt
+    const newOrder = await prisma.$transaction(async (tx) => {
+      if (couponIdToIncrement) {
+        await tx.coupon.update({
+          where: { id: couponIdToIncrement },
+          data: { usedCount: { increment: 1 } },
+        });
+      }
+
+      return tx.order.create({
+        data: {
+          orderNumber,
+          invoiceNumber,
+          userId,
+          shippingAddressId: addressId,
+          totalAmount: financials.finalTotal,
+          discountAmount: financials.discountAmount,
+          taxAmount: financials.taxAmount,
+          paymentMethod: (paymentMethod as PaymentMethod) || PaymentMethod.CREDIT_CARD,
+          paymentStatus: PaymentStatus.PENDING,
+          orderStatus: OrderStatus.PENDING_PAYMENT,
+          invoiceType: invoiceType === 'CORPORATE' ? InvoiceType.CORPORATE : InvoiceType.INDIVIDUAL,
+          tcKn: invoiceType === 'INDIVIDUAL' ? tcKn : null,
+          companyTitle: invoiceType === 'CORPORATE' ? companyTitle : null,
+          taxNo: invoiceType === 'CORPORATE' ? taxNo : null,
+          taxOffice: invoiceType === 'CORPORATE' ? taxOffice : null,
+          items: {
+            create: orderItemsData,
+          },
+        },
+        include: {
+          items: {
+            include: { product: true },
+          },
+          shippingAddress: true,
+        },
+      });
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Siparişiniz başarıyla alındı.',
+      order: newOrder,
+    });
+  } catch (error: unknown) {
+    // 🎯 COMPENSATING TRANSACTION: Only release stock if it was successfully reserved before this failure
+    console.error('Sipariş oluşturma hatası, stoklar iade ediliyor...', error);
+    try {
+      await releaseStockAtomic(stockItems);
+    } catch (releaseError: unknown) {
+      console.error('UYARI: Stok iadesi de başarısız oldu! Manuel müdahale gerekiyor:', releaseError);
+    }
+
+    const msg = error instanceof Error ? error.message : 'Sipariş işlenirken bir sunucu hatası oluştu.';
+    res.status(500).json({
+      success: false,
+      message: msg,
+    });
+  }
+}
+
+export async function getUserOrders(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const userId = req.user?.userId;
+
+    const orders = await prisma.order.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        items: {
+          include: { product: true },
+        },
+        shippingAddress: true,
+      },
+    });
+
+    res.status(200).json({ success: true, orders });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Siparişleriniz getirilemedi.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+export async function getAllOrders(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const orders = await prisma.order.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true, phone: true, role: true },
+        },
+        items: {
+          include: { product: true },
+        },
+        shippingAddress: true,
+      },
+    });
+
+    res.status(200).json({ success: true, orders });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Sipariş listesi alınamadı.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+export async function uploadReceipt(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const orderId = req.params.id as string;
+    const { receiptUrl } = req.body;
+    const userId = req.user?.userId;
+
+    if (!receiptUrl) {
+      res.status(400).json({ success: false, message: 'Dekont bağlantısı veya dosyası zorunludur.' });
+      return;
+    }
+
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!existingOrder) {
+      res.status(404).json({ success: false, message: 'Sipariş bulunamadı.' });
+      return;
+    }
+
+    // Check ownership or admin
+    if (existingOrder.userId !== userId && req.user?.role !== 'ADMIN') {
+      res.status(403).json({ success: false, message: 'Bu siparişe dekont yükleme yetkiniz yok.' });
+      return;
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        receiptUrl: receiptUrl,
+        shippingCarrier: existingOrder.shippingCarrier || 'Havale/EFT Doğrulama',
+      },
+      include: { items: { include: { product: true } }, shippingAddress: true },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Havale/EFT dekontu başarıyla sisteme iletildi. Yetkili onayından sonra siparişiniz hazırlanacaktır.',
+      order: {
+        ...updated,
+        receiptUrl,
+      },
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Dekont yüklenirken bir hata oluştu.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+export async function approveOrderPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const orderId = req.params.id as string;
+
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: orderId },
+    });
+
+    if (!existingOrder) {
+      res.status(404).json({ success: false, message: 'Sipariş bulunamadı.' });
+      return;
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        paymentStatus: PaymentStatus.PAID,
+        orderStatus: OrderStatus.PREPARING,
+      },
+      include: { items: { include: { product: true } }, shippingAddress: true },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Sipariş #${existingOrder.orderNumber} ödemesi onaylandı ve hazırlık aşamasına alındı.`,
+      order: updated,
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Ödeme onaylanamadı.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+function normalizeOrderStatus(rawStatus?: string): OrderStatus | undefined {
+  if (!rawStatus) return undefined;
+  const s = rawStatus.toUpperCase().trim();
+  if (s === 'PENDING' || s === 'PENDING_PAYMENT' || s === 'ÖDEME BEKLIYOR' || s === 'ÖDEME BEKLİYOR') return OrderStatus.PENDING_PAYMENT;
+  if (s === 'PAYMENT_CONFIRMED' || s === 'ÖDEME ONAYLANDI') return OrderStatus.PAYMENT_CONFIRMED;
+  if (s === 'PREPARING' || s === 'HAZIRLANIYOR') return OrderStatus.PREPARING;
+  if (s === 'SHIPPED' || s === 'KARGOYA VERILDI' || s === 'KARGOYA VERİLDİ') return OrderStatus.SHIPPED;
+  if (s === 'DELIVERED' || s === 'TESLIM EDILDI' || s === 'TESLİM EDİLDİ') return OrderStatus.DELIVERED;
+  if (s === 'CANCELLED' || s === 'İPTAL EDILDI' || s === 'İPTAL EDİLDİ') return OrderStatus.CANCELLED;
+  if (s === 'REFUNDED' || s === 'İADE EDILDI' || s === 'İADE EDİLDİ') return OrderStatus.REFUNDED;
+  return Object.values(OrderStatus).includes(rawStatus as OrderStatus) ? (rawStatus as OrderStatus) : undefined;
+}
+
+export async function updateOrderStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const orderId = req.params.id as string;
+    const { orderStatus: rawStatus, trackingNumber, shippingCarrier } = req.body;
+    const orderStatus = normalizeOrderStatus(rawStatus);
+
+    const existingOrder = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
+    });
+
+    if (!existingOrder) {
+      res.status(404).json({ success: false, message: 'Sipariş bulunamadı.' });
+      return;
+    }
+
+    if (orderStatus) {
+      validateOrderStateTransition(existingOrder.orderStatus, orderStatus);
+
+      if (orderStatus === OrderStatus.CANCELLED || orderStatus === OrderStatus.REFUNDED) {
+        const releaseItems = existingOrder.items.map((i) => ({
+          productId: i.productId,
+          variantId: i.variantId || undefined,
+          quantity: i.quantity,
+        }));
+        await releaseStockAtomic(releaseItems);
+      }
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        orderStatus: orderStatus || undefined,
+        trackingNumber: trackingNumber !== undefined ? trackingNumber : existingOrder.trackingNumber,
+        shippingCarrier: shippingCarrier !== undefined ? shippingCarrier : existingOrder.shippingCarrier,
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Sipariş #${existingOrder.orderNumber} durumu güncellendi.`,
+      order: updatedOrder,
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Sipariş durumu güncellenirken hata oluştu.';
+    res.status(400).json({
+      success: false,
+      message: msg,
+    });
+  }
+}

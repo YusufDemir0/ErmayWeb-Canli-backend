@@ -1,0 +1,269 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  DEALER
+  ADMIN
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAYMENT_CONFIRMED
+  PREPARING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum InvoiceType {
+  INDIVIDUAL
+  CORPORATE
+}
+
+enum PaymentMethod {
+  CREDIT_CARD
+  BANK_TRANSFER
+  CASH_ON_DELIVERY
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+model User {
+  id          String   @id @default(uuid())
+  email       String   @unique
+  password    String
+  name        String
+  phone       String
+  role        Role     @default(CUSTOMER)
+  isDealer    Boolean  @default(false)
+  companyName String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  addresses UserAddress[]
+  cards     UserCard[]
+  orders    Order[]
+
+  @@map("users")
+}
+
+model UserAddress {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  fullName    String
+  phone       String
+  city        String
+  district    String
+  addressLine String
+  zipCode     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  orders Order[]
+
+  @@map("user_addresses")
+}
+
+model Category {
+  id          String     @id @default(uuid())
+  name        String
+  slug        String     @unique
+  description String?
+  image       String?
+  parentId    String?
+  parent      Category?  @relation("SubCategories", fields: [parentId], references: [id])
+  children    Category[] @relation("SubCategories")
+
+  products Product[]
+
+  @@map("categories")
+}
+
+model Product {
+  id            String   @id @default(uuid())
+  categoryId    String
+  category      Category @relation(fields: [categoryId], references: [id])
+  name          String
+  slug          String   @unique
+  description   String
+  material      String
+  dimensions    String
+  price         Decimal  @db.Decimal(12, 2)
+  originalPrice Decimal? @db.Decimal(12, 2)
+  stock         Int      @default(0)
+  inStock       Boolean  @default(true)
+  salesCount    Int      @default(0)
+  image         String
+  images        String[] @default([])
+  features      String[]
+  vatRate       Decimal  @default(0.20) @db.Decimal(4, 2)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  variants   ProductVariant[]
+  orderItems OrderItem[]
+
+  @@map("products")
+}
+
+model ProductVariant {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  sku       String  @unique
+  color     String
+  finish    String?
+  stock     Int     @default(0)
+  price     Decimal @db.Decimal(12, 2)
+  b2bPrice  Decimal? @db.Decimal(12, 2)
+
+  orderItems OrderItem[]
+
+  @@map("product_variants")
+}
+
+model Order {
+  id                String        @id @default(uuid())
+  orderNumber       String        @unique
+  userId            String
+  user              User          @relation(fields: [userId], references: [id])
+  shippingAddressId String
+  shippingAddress   UserAddress   @relation(fields: [shippingAddressId], references: [id])
+  totalAmount       Decimal       @db.Decimal(12, 2)
+  discountAmount    Decimal       @default(0) @db.Decimal(12, 2)
+  taxAmount         Decimal       @default(0) @db.Decimal(12, 2)
+  paymentMethod     PaymentMethod @default(CREDIT_CARD)
+  paymentStatus     PaymentStatus @default(PENDING)
+  orderStatus       OrderStatus   @default(PREPARING)
+
+  // Invoice details
+  invoiceType   InvoiceType @default(INDIVIDUAL)
+  invoiceNumber String?
+  tcKn          String?
+  companyTitle  String?
+  taxNo         String?
+  taxOffice     String?
+
+  // Payment receipt for wire transfer / EFT
+  receiptUrl String?
+
+  // Shipping & Cargo details
+  shippingCarrier String?
+  trackingNumber  String?
+
+  items          OrderItem[]
+  returnRequests ReturnRequest[]
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@map("orders")
+}
+
+model OrderItem {
+  id         String          @id @default(uuid())
+  orderId    String
+  order      Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId  String
+  product    Product         @relation(fields: [productId], references: [id])
+  variantId  String?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id])
+  quantity   Int
+  unitPrice  Decimal         @db.Decimal(12, 2)
+  totalPrice Decimal         @db.Decimal(12, 2)
+
+  @@map("order_items")
+}
+
+model CmsBlock {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  content   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("cms_blocks")
+}
+
+model Coupon {
+  id             String    @id @default(uuid())
+  code           String    @unique
+  discount       Decimal   @db.Decimal(12, 2)
+  discountAmount Decimal   @default(0) @db.Decimal(12, 2)
+  discountType   String    @default("percentage")
+  minAmount      Decimal?  @db.Decimal(12, 2)
+  expiresAt      DateTime?
+  expiryDate     DateTime?
+  usedCount      Int       @default(0)
+  maxUses        Int?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  @@map("coupons")
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  COMPLETED
+}
+
+model ReturnRequest {
+  id               String       @id @default(uuid())
+  orderId          String
+  order            Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reason           String
+  status           ReturnStatus @default(REQUESTED)
+  cargoTrackingNo  String?
+  notes            String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@map("return_requests")
+}
+
+model UserCard {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cardTitle        String
+  cardHolder       String
+  cardNumberMasked String
+  expiry           String
+  cardType         String   @default("generic")
+  createdAt        DateTime @default(now())
+
+  @@map("user_cards")
+}
+
+model Store {
+  id        String   @id @default(uuid())
+  name      String
+  city      String
+  district  String?
+  address   String
+  phone     String
+  email     String?
+  hours     String?
+  image     String?
+  mapUrl    String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("stores")
+}
