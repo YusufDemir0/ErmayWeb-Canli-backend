@@ -16,7 +16,7 @@
     "seed": "ts-node -T prisma/seed.ts"
   },
   "dependencies": {
-    "@prisma/client": "^6.3.1",
+    "@prisma/client": "6.3.1",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
@@ -43,7 +43,7 @@
     "@types/multer": "^2.2.0",
     "@types/node": "^22.13.10",
     "nodemon": "^3.1.9",
-    "prisma": "^6.3.1",
+    "prisma": "6.3.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2"
   }
