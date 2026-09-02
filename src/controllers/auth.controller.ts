@@ -352,6 +352,19 @@ export async function deleteAddress(req: AuthenticatedRequest, res: Response): P
       return;
     }
 
+    // Geçmiş siparişlerde kullanılmış mı kontrol et
+    const hasOrders = await prisma.order.findFirst({
+      where: { shippingAddressId: id },
+    });
+
+    if (hasOrders) {
+      res.status(400).json({
+        success: false,
+        message: 'Geçmiş siparişlerinizde kullanılan adresler yasal fatura kaydı nedeniyle silinemez. Dilerseniz yeni bir adres ekleyebilirsiniz.',
+      });
+      return;
+    }
+
     await prisma.userAddress.delete({
       where: { id },
     });

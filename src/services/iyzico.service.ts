@@ -164,3 +164,94 @@ export async function executeIyzicoPayment(paymentData: IyzicoPaymentRequest): P
     });
   });
 }
+
+/**
+ * PCI-DSS Uyumlu Iyzico Responsive Checkout Form Başlatma
+ */
+export async function initializeCheckoutForm(paymentData: Omit<IyzicoPaymentRequest, 'paymentCard'> & { callbackUrl: string }): Promise<{
+  status: 'success' | 'failure';
+  checkoutFormContent?: string;
+  token?: string;
+  errorMessage?: string;
+}> {
+  const formattedBasketItems = (paymentData.basketItems && paymentData.basketItems.length > 0)
+    ? paymentData.basketItems.map((item, idx) => ({
+        id: item.id || `ITEM-${idx + 1}`,
+        name: item.name || 'Mobilya Kalemi',
+        category1: item.category1 || 'Mobilya',
+        category2: item.category2 || 'Ofis & Yaşam',
+        itemType: item.itemType || Iyzipay.BASKET_ITEM_TYPE.PHYSICAL,
+        price: Number(item.price).toFixed(2),
+      }))
+    : [
+        {
+          id: 'ITEM-DEFAULT-01',
+          name: 'Ermay Mobilya Siparişi',
+          category1: 'Mobilya',
+          itemType: Iyzipay.BASKET_ITEM_TYPE.PHYSICAL,
+          price: Number(paymentData.paidPrice).toFixed(2),
+        },
+      ];
+
+  const requestPayload = {
+    locale: Iyzipay.LOCALE.TR,
+    conversationId: paymentData.conversationId,
+    price: Number(paymentData.price).toFixed(2),
+    paidPrice: Number(paymentData.paidPrice).toFixed(2),
+    currency: Iyzipay.CURRENCY.TRY,
+    basketId: paymentData.basketId || `BSK-${Date.now()}`,
+    paymentGroup: Iyzipay.PAYMENT_GROUP.PRODUCT,
+    callbackUrl: paymentData.callbackUrl,
+    buyer: {
+      id: paymentData.buyer.id,
+      name: paymentData.buyer.name,
+      surname: paymentData.buyer.surname,
+      gsmNumber: paymentData.buyer.gsmNumber,
+      email: paymentData.buyer.email,
+      identityNumber: paymentData.buyer.identityNumber,
+      registrationAddress: paymentData.buyer.registrationAddress,
+      ip: paymentData.buyer.ip,
+      city: paymentData.buyer.city,
+      country: paymentData.buyer.country,
+    },
+    shippingAddress: {
+      contactName: `${paymentData.buyer.name} ${paymentData.buyer.surname}`,
+      city: paymentData.buyer.city,
+      country: paymentData.buyer.country,
+      address: paymentData.buyer.registrationAddress,
+    },
+    billingAddress: {
+      contactName: `${paymentData.buyer.name} ${paymentData.buyer.surname}`,
+      city: paymentData.buyer.city,
+      country: paymentData.buyer.country,
+      address: paymentData.buyer.registrationAddress,
+    },
+    basketItems: formattedBasketItems,
+  };
+
+  return new Promise((resolve) => {
+    iyzipayClient.checkoutFormInitialize.create(requestPayload, (err: Error | null, result: any) => {
+      if (err || !result) {
+        resolve({
+          status: 'failure',
+          errorMessage: err?.message || 'Iyzico Checkout Form başlatılamadı.',
+        });
+        return;
+      }
+
+      if (result.status === 'success') {
+        resolve({
+          status: 'success',
+          checkoutFormContent: result.checkoutFormContent,
+          token: result.token,
+        });
+      } else {
+        resolve({
+          status: 'failure',
+          errorMessage: result.errorMessage || 'Ödeme formu oluşturulamadı.',
+        });
+      }
+    });
+  });
+}
+

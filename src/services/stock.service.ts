@@ -55,27 +55,30 @@ export async function reserveStockAtomic(items: ReserveStockItem[]): Promise<voi
   const acquiredLocks: { lockKey: string; lockValue: string }[] = [];
 
   try {
-    // 1. Redis Distribütör Kilitlerini Edin (Self-Deadlock Önleme için Tekilleştirildi)
+    // 1. Redis Distribütör Kilitlerini Edin (Deadlock Önleme için Alfabetik Sıralandı)
     const uniqueLockKeys = Array.from(
       new Set(items.map((item) => `stock_lock:${item.variantId || item.productId}`).filter(Boolean))
-    );
+    ).sort();
 
     for (const lockKey of uniqueLockKeys) {
       let lockAcquired = false;
 
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const lockValue = await acquireRedisLock(lockKey, 3000);
-        if (lockValue) {
-          acquiredLocks.push({ lockKey, lockValue });
-          lockAcquired = true;
-          break;
+      // Sadece Redis bağlı ve çalışıyorsa kilit almayı dene
+      if (redis.status === 'ready') {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const lockValue = await acquireRedisLock(lockKey, 3000);
+          if (lockValue) {
+            acquiredLocks.push({ lockKey, lockValue });
+            lockAcquired = true;
+            break;
+          }
+          // Kilit başkasında ise rastgele jitter ile 40-70ms bekle ve tekrar dene
+          await new Promise((r) => setTimeout(r, 40 + Math.random() * 30));
         }
-        // Kilit başkasında ise 50ms bekle ve tekrar dene
-        await new Promise((r) => setTimeout(r, 50));
-      }
 
-      if (!lockAcquired && redis.status === 'ready') {
-        throw new StockReservationError('Ürün stoku için eşzamanlı işlem yoğunluğu var. Lütfen saniyeler sonra tekrar deneyiniz.');
+        if (!lockAcquired) {
+          throw new StockReservationError('Ürün stoku için eşzamanlı işlem yoğunluğu var. Lütfen birkaç saniye sonra tekrar deneyiniz.');
+        }
       }
     }
 

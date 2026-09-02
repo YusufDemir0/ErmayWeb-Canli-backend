@@ -33,25 +33,36 @@ app.use(helmet({
 }));
 
 // 4. Enterprise CORS Configuration with Strict Whitelist Enforcement
-const rawOrigins = process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim().toLowerCase()) : [];
+const rawOrigins = (process.env.CORS_ORIGIN || process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim().toLowerCase())
+  .filter(Boolean);
+
+const LOCALHOST_REGEX = /^https?:\/\/(localhost|127\.0\.0\.1)(:[0-9]+)?$/;
+const OFFICIAL_DOMAINS = [
+  'https://ermaymobilya.com',
+  'https://www.ermaymobilya.com',
+];
+
 app.use(cors({
   origin: (origin, callback) => {
     // Allow non-browser clients (curl, mobile, server-side SSR)
     if (!origin) return callback(null, true);
     
-    const lowerOrigin = origin.toLowerCase();
+    const lowerOrigin = origin.toLowerCase().trim();
 
-    // Check against configured raw origins
-    if (rawOrigins.includes('*') || rawOrigins.includes(lowerOrigin)) {
+    // Check against configured allowed origins from environment
+    if (rawOrigins.includes(lowerOrigin) || (process.env.NODE_ENV !== 'production' && rawOrigins.includes('*'))) {
       return callback(null, true);
     }
 
-    // Check trusted development and production domains
-    const isLocalhost = lowerOrigin.includes('localhost:') || lowerOrigin.includes('127.0.0.1:');
-    const isVercelPreview = lowerOrigin.endsWith('.vercel.app');
-    const isOfficialDomain = lowerOrigin === 'https://ermaymobilya.com' || lowerOrigin === 'https://www.ermaymobilya.com' || lowerOrigin.endsWith('.ermaymobilya.com');
+    // Check official production domains
+    if (OFFICIAL_DOMAINS.includes(lowerOrigin)) {
+      return callback(null, true);
+    }
 
-    if (isLocalhost || isVercelPreview || isOfficialDomain) {
+    // In development mode only: allow exact localhost & 127.0.0.1 origins
+    if (process.env.NODE_ENV !== 'production' && LOCALHOST_REGEX.test(lowerOrigin)) {
       return callback(null, true);
     }
 

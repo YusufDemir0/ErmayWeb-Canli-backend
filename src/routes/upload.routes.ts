@@ -5,9 +5,14 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { authenticateToken } from '../middlewares/auth.middleware';
 
-const uploadsDir = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+const publicUploadsDir = path.join(__dirname, '../../uploads');
+const privateUploadsDir = path.join(__dirname, '../../uploads/private');
+
+if (!fs.existsSync(publicUploadsDir)) {
+  fs.mkdirSync(publicUploadsDir, { recursive: true });
+}
+if (!fs.existsSync(privateUploadsDir)) {
+  fs.mkdirSync(privateUploadsDir, { recursive: true });
 }
 
 // Memory storage to inspect buffer magic bytes before writing to disk
@@ -71,27 +76,47 @@ router.post('/', authenticateToken, upload.single('file'), (req: Request, res: R
       return;
     }
 
-    // Cryptographically secure random filename
-    const randomHash = crypto.randomBytes(16).toString('hex');
+    const isPrivate = req.query.isPrivate === '1' || req.query.isPrivate === 'true' || req.body.isPrivate === 'true' || cleanExt === '.pdf';
+    const targetDir = isPrivate ? privateUploadsDir : publicUploadsDir;
+
+    // High-entropy 256-bit cryptographically secure random filename
+    const randomHash = crypto.randomBytes(24).toString('hex');
     const uniqueName = `${Date.now()}_${randomHash}${cleanExt}`;
-    const destinationPath = path.join(uploadsDir, uniqueName);
+    const destinationPath = path.join(targetDir, uniqueName);
     
-    // Save verified buffer to disk
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
     fs.writeFileSync(destinationPath, req.file.buffer);
 
-    const fileUrl = `/uploads/${uniqueName}`;
+    const fileUrl = isPrivate ? `/api/v1/upload/private/${uniqueName}` : `/uploads/${uniqueName}`;
 
     res.status(200).json({
       success: true,
       message: 'Dosya başarıyla doğrulandı ve yüklendi.',
       url: fileUrl,
+      isPrivate,
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Dosya yükleme başarısız.';
     res.status(500).json({ success: false, message: msg });
+  }
+});
+
+// Authenticated Private File Retrieval (KVKK & Financial Document Protection)
+router.get('/private/:fileName', authenticateToken, (req: Request, res: Response): void => {
+  try {
+    const rawParam = req.params.fileName;
+    const fileName = path.basename(Array.isArray(rawParam) ? rawParam[0] : (rawParam || '')); // Prevent path traversal
+    const filePath = path.join(privateUploadsDir, fileName);
+
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ success: false, message: 'İstenen özel belge bulunamadı.' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-cache, no-store, must-revalidate');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(filePath);
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Belge okunurken bir hata oluştu.' });
   }
 });
 

@@ -43,21 +43,25 @@ export function calculateOrderFinancials(
   let taxKurus = 0;
 
   if (subTotalKurus > 0) {
-    const discountRatio = discountKurus / subTotalKurus;
+    const discountRatio = Math.min(1, Math.max(0, discountKurus / subTotalKurus));
     
     for (const item of items) {
-      const unitPriceKurus = toKurus(item.unitPrice);
-      const itemTotalKurus = unitPriceKurus * item.quantity;
+      const unitPriceKurus = toKurus(item.unitPrice || 0);
+      const itemTotalKurus = unitPriceKurus * (item.quantity || 1);
       const vatRate = item.vatRate !== undefined ? Number(item.vatRate) : 0.20;
 
       // Net and Tax after proportional coupon distribution
       const discountedItemTotal = Math.round(itemTotalKurus * (1 - discountRatio));
-      const discountedItemNet = Math.round(discountedItemTotal / (1 + vatRate));
-      const discountedItemTax = discountedItemTotal - discountedItemNet;
+      const safeVatFactor = 1 + (isNaN(vatRate) ? 0.20 : Math.max(0, vatRate));
+      const discountedItemNet = Math.round(discountedItemTotal / safeVatFactor);
+      const discountedItemTax = Math.max(0, discountedItemTotal - discountedItemNet);
 
       netKurus += discountedItemNet;
       taxKurus += discountedItemTax;
     }
+  } else {
+    netKurus = 0;
+    taxKurus = 0;
   }
 
   return {

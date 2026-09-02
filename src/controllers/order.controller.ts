@@ -39,29 +39,7 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
     return;
   }
 
-  const stockItems = items.map((i: CartItemInput) => ({
-    productId: i.productId || i.product?.id,
-    variantId: i.variantId,
-    quantity: i.quantity,
-  }));
-
-  // 1. Stock Lock Atomic
-  try {
-    await reserveStockAtomic(stockItems);
-  } catch (stockError: unknown) {
-    const msg = stockError instanceof Error ? stockError.message : 'Stok rezervasyonu başarısız.';
-    res.status(409).json({ success: false, message: msg });
-    return;
-  }
-
-  // 2. Create Order with Server-Side Coupon & Price Calculation
-  try {
-    // Fetch DB Products first to calculate subtotal and prevent client price tampering
-    const itemCalculationInputs: Array<{ unitPrice: number; quantity: number; vatRate: number }> = [];
-    const orderItemsData: Array<{ productId: string; variantId: string | null; quantity: number; unitPrice: number; totalPrice: number }> = [];
-    let subTotalKurus = 0;
-
-    // Check address presence early to prevent runtime foreign key errors
+    // 1. Ürün ve Adres Doğrulamalarını Stok Rezerve Etmeden ÖNCE Yap
     let addressId = shippingAddressId;
     const isUuid = typeof addressId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(addressId);
     if (!isUuid) {
@@ -73,154 +51,198 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
       return;
     }
 
+    const itemCalculationInputs: Array<{ unitPrice: number; quantity: number; vatRate: number }> = [];
+    const orderItemsData: Array<{ productId: string; variantId: string | null; quantity: number; unitPrice: number; totalPrice: number }> = [];
+    let subTotalKurus = 0;
+
     for (const item of items) {
       const pId = item.productId || item.product?.id;
-      let dbProduct = pId ? await prisma.product.findUnique({ where: { id: pId } }) : null;
-
-      if (!dbProduct) {
-        // Strict Error: Do not guess or substitute products
+      if (!pId) {
         res.status(400).json({
           success: false,
-          message: `Sipariş edilmek istenen ürün (${pId || item.product?.name || 'Bilinmeyen'}) veritabanında bulunamadı veya satıştan kaldırılmıştır.`,
+          message: 'Siparişteki ürünün geçerli bir kimlik bilgisi (productId) bulunamadı.',
         });
         return;
       }
 
-      const unitPrice = Number(item.product?.price || dbProduct.price);
+      const dbProduct = await prisma.product.findUnique({
+        where: { id: pId },
+        include: { variants: true },
+      });
+
+      if (!dbProduct || !dbProduct.inStock) {
+        res.status(400).json({
+          success: false,
+          message: `Sipariş edilmek istenen ürün (${pId || item.product?.name || 'Bilinmeyen'}) stokta yok veya satıştan kaldırılmıştır.`,
+        });
+        return;
+      }
+
+      let finalUnitPrice = Number(dbProduct.price);
+
+      if (item.variantId) {
+        const variant = dbProduct.variants.find((v) => v.id === item.variantId);
+        if (!variant) {
+          res.status(400).json({
+            success: false,
+            message: `Ürüne ait geçerli bir varyant bulunamadı (Variant ID: ${item.variantId}).`,
+          });
+          return;
+        }
+        finalUnitPrice = Number(variant.price);
+      }
+
       const vatRate = dbProduct.vatRate ? Number(dbProduct.vatRate) : 0.20;
 
       itemCalculationInputs.push({
-        unitPrice,
+        unitPrice: finalUnitPrice,
         quantity: item.quantity,
         vatRate,
       });
 
-      subTotalKurus += toKurus(unitPrice * item.quantity);
+      subTotalKurus += toKurus(finalUnitPrice * item.quantity);
 
       orderItemsData.push({
         productId: dbProduct.id,
         variantId: item.variantId || null,
         quantity: item.quantity,
-        unitPrice,
-        totalPrice: Number((unitPrice * item.quantity).toFixed(2)),
+        unitPrice: finalUnitPrice,
+        totalPrice: Number((finalUnitPrice * item.quantity).toFixed(2)),
       });
     }
 
-    let calculatedCouponKurus = 0;
-    let couponIdToIncrement: string | null = null;
+    // 2. Doğrulanmış Ürünler için Atomik Stok Rezervasyonu
+    const stockItems = items.map((i: CartItemInput) => ({
+      productId: i.productId || i.product?.id,
+      variantId: i.variantId,
+      quantity: i.quantity,
+    }));
 
-    if (couponCode && typeof couponCode === 'string' && couponCode.trim().length > 0) {
-      const dbCoupon = await prisma.coupon.findUnique({
-        where: { code: couponCode.trim().toUpperCase() },
-      });
+    let stockReserved = false;
 
-      if (dbCoupon && dbCoupon.isActive) {
-        let isExpired = false;
-        if (dbCoupon.expiryDate) {
-          const exp = new Date(dbCoupon.expiryDate);
-          exp.setHours(23, 59, 59, 999);
-          isExpired = exp.getTime() < Date.now();
-        }
+    try {
+      await reserveStockAtomic(stockItems);
+      stockReserved = true;
+    } catch (stockError: unknown) {
+      const msg = stockError instanceof Error ? stockError.message : 'Stok rezervasyonu başarısız.';
+      res.status(409).json({ success: false, message: msg });
+      return;
+    }
 
-        if (!isExpired) {
-          if (!dbCoupon.maxUses || dbCoupon.usedCount < dbCoupon.maxUses) {
-            if (dbCoupon.discountType === 'percentage') {
-              calculatedCouponKurus = Math.round((subTotalKurus * Number(dbCoupon.discount)) / 100);
-            } else {
-              calculatedCouponKurus = toKurus(Number(dbCoupon.discount || dbCoupon.discountAmount));
+    // 3. Siparişi Veritabanına Transaction ile Kaydet
+    try {
+      let calculatedCouponKurus = 0;
+      let couponIdToIncrement: string | null = null;
+
+      if (couponCode && typeof couponCode === 'string' && couponCode.trim().length > 0) {
+        const dbCoupon = await prisma.coupon.findUnique({
+          where: { code: couponCode.trim().toUpperCase() },
+        });
+
+        if (dbCoupon && dbCoupon.isActive) {
+          let isExpired = false;
+          if (dbCoupon.expiryDate) {
+            const exp = new Date(dbCoupon.expiryDate);
+            exp.setHours(23, 59, 59, 999);
+            isExpired = exp.getTime() < Date.now();
+          }
+
+          if (!isExpired) {
+            if (!dbCoupon.maxUses || dbCoupon.usedCount < dbCoupon.maxUses) {
+              if (dbCoupon.discountType === 'percentage') {
+                calculatedCouponKurus = Math.round((subTotalKurus * Number(dbCoupon.discount)) / 100);
+              } else {
+                calculatedCouponKurus = toKurus(Number(dbCoupon.discount || dbCoupon.discountAmount));
+              }
+              couponIdToIncrement = dbCoupon.id;
             }
-            couponIdToIncrement = dbCoupon.id;
           }
         }
       }
-    }
 
-    if (!addressId && shippingAddress) {
-      const createdAddr = await prisma.userAddress.create({
-        data: {
-          userId,
-          title: shippingAddress.title || 'Teslimat Adresi',
-          fullName: shippingAddress.fullName || 'Değerli Müşterimiz',
-          phone: shippingAddress.phone || '',
-          city: shippingAddress.city || 'İstanbul',
-          district: shippingAddress.district || 'Ümraniye',
-          addressLine: shippingAddress.addressLine || 'Modoko',
-          zipCode: shippingAddress.zipCode || '34000',
-        },
-      });
-      addressId = createdAddr.id;
-    }
-
-    // Calculate Integer Kurus Financials
-    const financials = calculateOrderFinancials(itemCalculationInputs, calculatedCouponKurus);
-
-    // Cryptographically secure collision-resistant sequential Order & Invoice IDs
-    const year = new Date().getFullYear();
-    const epochSuffix = Math.floor(Date.now() / 1000).toString().slice(-5);
-    const entropy = crypto.randomBytes(3).toString('hex').toUpperCase();
-    const orderNumber = `ORD-${year}${epochSuffix}-${entropy}`;
-    const invoiceNumber = `ERM-${year}${epochSuffix}-${entropy}`;
-
-    // Execute Order Creation & Coupon Increment in Prisma Atomic Transaction
-    // All orders start as PENDING_PAYMENT until verified by payment gateway or bank receipt
-    const newOrder = await prisma.$transaction(async (tx) => {
-      if (couponIdToIncrement) {
-        await tx.coupon.update({
-          where: { id: couponIdToIncrement },
-          data: { usedCount: { increment: 1 } },
+      if (!addressId && shippingAddress) {
+        const createdAddr = await prisma.userAddress.create({
+          data: {
+            userId,
+            title: shippingAddress.title || 'Teslimat Adresi',
+            fullName: shippingAddress.fullName || 'Değerli Müşterimiz',
+            phone: shippingAddress.phone || '',
+            city: shippingAddress.city || 'İstanbul',
+            district: shippingAddress.district || 'Ümraniye',
+            addressLine: shippingAddress.addressLine || 'Modoko',
+            zipCode: shippingAddress.zipCode || '34000',
+          },
         });
+        addressId = createdAddr.id;
       }
 
-      return tx.order.create({
-        data: {
-          orderNumber,
-          invoiceNumber,
-          userId,
-          shippingAddressId: addressId,
-          totalAmount: financials.finalTotal,
-          discountAmount: financials.discountAmount,
-          taxAmount: financials.taxAmount,
-          paymentMethod: (paymentMethod as PaymentMethod) || PaymentMethod.CREDIT_CARD,
-          paymentStatus: PaymentStatus.PENDING,
-          orderStatus: OrderStatus.PENDING_PAYMENT,
-          invoiceType: invoiceType === 'CORPORATE' ? InvoiceType.CORPORATE : InvoiceType.INDIVIDUAL,
-          tcKn: invoiceType === 'INDIVIDUAL' ? tcKn : null,
-          companyTitle: invoiceType === 'CORPORATE' ? companyTitle : null,
-          taxNo: invoiceType === 'CORPORATE' ? taxNo : null,
-          taxOffice: invoiceType === 'CORPORATE' ? taxOffice : null,
-          items: {
-            create: orderItemsData,
+      const financials = calculateOrderFinancials(itemCalculationInputs, calculatedCouponKurus);
+
+      const year = new Date().getFullYear();
+      const epochSuffix = Math.floor(Date.now() / 1000).toString().slice(-5);
+      const entropy = crypto.randomBytes(3).toString('hex').toUpperCase();
+      const orderNumber = `ORD-${year}${epochSuffix}-${entropy}`;
+      const invoiceNumber = `ERM-${year}${epochSuffix}-${entropy}`;
+
+      const newOrder = await prisma.$transaction(async (tx) => {
+        if (couponIdToIncrement) {
+          await tx.coupon.update({
+            where: { id: couponIdToIncrement },
+            data: { usedCount: { increment: 1 } },
+          });
+        }
+
+        return tx.order.create({
+          data: {
+            orderNumber,
+            invoiceNumber,
+            userId,
+            shippingAddressId: addressId,
+            totalAmount: financials.finalTotal,
+            discountAmount: financials.discountAmount,
+            taxAmount: financials.taxAmount,
+            paymentMethod: (paymentMethod as PaymentMethod) || PaymentMethod.CREDIT_CARD,
+            paymentStatus: PaymentStatus.PENDING,
+            orderStatus: OrderStatus.PENDING_PAYMENT,
+            invoiceType: invoiceType === 'CORPORATE' ? InvoiceType.CORPORATE : InvoiceType.INDIVIDUAL,
+            tcKn: invoiceType === 'INDIVIDUAL' ? tcKn : null,
+            companyTitle: invoiceType === 'CORPORATE' ? companyTitle : null,
+            taxNo: invoiceType === 'CORPORATE' ? taxNo : null,
+            taxOffice: invoiceType === 'CORPORATE' ? taxOffice : null,
+            items: {
+              create: orderItemsData,
+            },
           },
-        },
-        include: {
-          items: {
-            include: { product: true },
+          include: {
+            items: {
+              include: { product: true },
+            },
+            shippingAddress: true,
           },
-          shippingAddress: true,
-        },
+        });
       });
-    });
 
-    res.status(201).json({
-      success: true,
-      message: 'Siparişiniz başarıyla alındı.',
-      order: newOrder,
-    });
-  } catch (error: unknown) {
-    // 🎯 COMPENSATING TRANSACTION: Only release stock if it was successfully reserved before this failure
-    console.error('Sipariş oluşturma hatası, stoklar iade ediliyor...', error);
-    try {
-      await releaseStockAtomic(stockItems);
-    } catch (releaseError: unknown) {
-      console.error('UYARI: Stok iadesi de başarısız oldu! Manuel müdahale gerekiyor:', releaseError);
+      res.status(201).json({
+        success: true,
+        message: 'Siparişiniz başarıyla alındı.',
+        order: newOrder,
+      });
+    } catch (orderError: unknown) {
+      if (stockReserved) {
+        console.error('Sipariş oluşturma hatası, rezerve edilen stoklar iade ediliyor...', orderError);
+        try {
+          await releaseStockAtomic(stockItems);
+        } catch (releaseError: unknown) {
+          console.error('UYARI: Stok iadesi başarısız oldu! Manuel müdahale gerekiyor:', releaseError);
+        }
+      }
+
+      const msg = orderError instanceof Error ? orderError.message : 'Sipariş işlenirken bir sunucu hatası oluştu.';
+      res.status(500).json({
+        success: false,
+        message: msg,
+      });
     }
-
-    const msg = error instanceof Error ? error.message : 'Sipariş işlenirken bir sunucu hatası oluştu.';
-    res.status(500).json({
-      success: false,
-      message: msg,
-    });
-  }
 }
 
 export async function getUserOrders(req: AuthenticatedRequest, res: Response): Promise<void> {
