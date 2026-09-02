@@ -50,14 +50,14 @@ export const UpdateCmsBlockSchema = z.object({
 
 export const ProcessPaymentSchema = z.object({
   conversationId: z.string().optional(),
-  orderId: z.string().optional(),
-  totalAmount: z.number({ invalid_type_error: 'Ödeme tutarı geçerli bir sayı olmalıdır.' }).positive('Ödeme tutarı 0\'dan büyük olmalıdır.'),
+  orderId: z.string().min(1, 'Sipariş ID (orderId) zorunludur.'),
+  totalAmount: z.number().optional(),
   installment: z.number().int().min(1).max(12).optional(),
-  cardHolderName: z.string().min(2, 'Kart üzerindeki isim en az 2 karakter olmalıdır.').optional(),
-  cardNumber: z.string().optional(),
-  expireMonth: z.union([z.string(), z.number()]).optional(),
-  expireYear: z.union([z.string(), z.number()]).optional(),
-  cvv: z.string().optional(),
+  cardHolderName: z.string().min(2, 'Kart üzerindeki isim en az 2 karakter olmalıdır.'),
+  cardNumber: z.string().min(12, 'Kart numarası eksik veya geçersiz.'),
+  expireMonth: z.union([z.string(), z.number()]),
+  expireYear: z.union([z.string(), z.number()]),
+  cvv: z.string().min(3).max(4, 'CVV 3 veya 4 haneli olmalıdır.'),
   savedCardId: z.string().optional(),
   cardToken: z.string().optional(),
   buyer: z.object({

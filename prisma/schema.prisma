@@ -117,8 +117,23 @@ model Product {
 
   variants   ProductVariant[]
   orderItems OrderItem[]
+  reviews    Review[]
 
   @@map("products")
+}
+
+model Review {
+  id         String   @id @default(uuid())
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId     String?
+  userName   String
+  rating     Int      @default(5)
+  comment    String
+  isApproved Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@map("reviews")
 }
 
 model ProductVariant {

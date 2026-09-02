@@ -181,30 +181,22 @@ export async function releaseStockAtomic(items: ReserveStockItem[]): Promise<voi
           data: { stock: { increment: item.quantity } },
         });
 
-        // Parent product recovery with guaranteed non-negative sales count
-        const parent = await tx.product.findUnique({ where: { id: variant.productId } });
-        const safeSalesCount = parent ? Math.max(0, parent.salesCount - item.quantity) : 0;
-
-        await tx.product.update({
-          where: { id: variant.productId },
-          data: {
-            stock: { increment: item.quantity },
-            inStock: true,
-            salesCount: safeSalesCount,
-          },
-        });
-      } else {
-        const product = await tx.product.findUnique({ where: { id: item.productId } });
-        const safeSalesCount = product ? Math.max(0, product.salesCount - item.quantity) : 0;
-
-        await tx.product.update({
-          where: { id: item.productId },
-          data: {
-            stock: { increment: item.quantity },
-            inStock: true,
-            salesCount: safeSalesCount,
-          },
-        });
+        // Atomic update on PostgreSQL level preventing lost updates
+        await tx.$executeRaw`
+          UPDATE "products" 
+          SET "stock" = "stock" + ${item.quantity}, 
+              "inStock" = true, 
+              "salesCount" = GREATEST(0, "salesCount" - ${item.quantity}) 
+          WHERE "id" = ${variant.productId}
+        `;
+      } else if (item.productId) {
+        await tx.$executeRaw`
+          UPDATE "products" 
+          SET "stock" = "stock" + ${item.quantity}, 
+              "inStock" = true, 
+              "salesCount" = GREATEST(0, "salesCount" - ${item.quantity}) 
+          WHERE "id" = ${item.productId}
+        `;
       }
     }
   });

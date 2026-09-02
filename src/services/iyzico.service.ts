@@ -255,3 +255,56 @@ export async function initializeCheckoutForm(paymentData: Omit<IyzicoPaymentRequ
   });
 }
 
+/**
+ * Iyzico Webhook / Callback Token Sonucunu Sorgulama (Doğrudan Iyzico API Doğrulaması)
+ */
+export async function retrieveCheckoutFormResult(token: string): Promise<{
+  status: 'success' | 'failure';
+  paymentStatus?: string;
+  paymentId?: string;
+  conversationId?: string;
+  basketId?: string;
+  price?: number;
+  paidPrice?: number;
+  errorMessage?: string;
+}> {
+  return new Promise((resolve) => {
+    iyzipayClient.checkoutForm.retrieve(
+      {
+        locale: Iyzipay.LOCALE.TR,
+        token,
+      },
+      (err: Error | null, result: any) => {
+        if (err || !result) {
+          resolve({
+            status: 'failure',
+            errorMessage: err?.message || 'Iyzico token doğrulama servisi yanıt vermedi.',
+          });
+          return;
+        }
+
+        if (result.status === 'success' && result.paymentStatus === 'SUCCESS') {
+          resolve({
+            status: 'success',
+            paymentStatus: result.paymentStatus,
+            paymentId: result.paymentId,
+            conversationId: result.conversationId,
+            basketId: result.basketId,
+            price: Number(result.price),
+            paidPrice: Number(result.paidPrice),
+          });
+        } else {
+          resolve({
+            status: 'failure',
+            paymentStatus: result.paymentStatus || 'FAILURE',
+            paymentId: result.paymentId,
+            conversationId: result.conversationId,
+            errorMessage: result.errorMessage || 'Ödeme tamamlanamadı veya iptal edildi.',
+          });
+        }
+      }
+    );
+  });
+}
+
+

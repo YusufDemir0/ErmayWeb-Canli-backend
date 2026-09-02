@@ -1,91 +1,104 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
-import { executeIyzicoPayment, initializeCheckoutForm } from '../services/iyzico.service';
+import { executeIyzicoPayment, initializeCheckoutForm, retrieveCheckoutFormResult } from '../services/iyzico.service';
 import { OrderStatus, PaymentStatus } from '@prisma/client';
 import { releaseStockAtomic } from '../services/stock.service';
-
 
 export async function processCardPayment(req: Request, res: Response): Promise<void> {
   try {
     const {
       orderId,
       conversationId,
-      totalAmount,
       installment = 1,
       cardHolderName,
       cardNumber,
       expireMonth,
       expireYear,
       cvv,
-      savedCardId,
-      cardToken,
       buyer,
-      basketItems,
     } = req.body;
 
-    const isSavedCard = Boolean(savedCardId || cardToken);
+    if (!orderId) {
+      res.status(400).json({ success: false, message: 'Ödeme için sipariş numarası (orderId) zorunludur.' });
+      return;
+    }
 
-    if (!isSavedCard && (!cardNumber || !expireMonth || !expireYear || !cvv || !cardHolderName)) {
+    // 1. FİYATI ASLA CLIENT'TAN ALMA! Siparişi DB'den çek ve kesin tutarı doğrula (Zero-Trust Security)
+    const dbOrder = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        items: { include: { product: true } },
+        shippingAddress: true,
+        user: true,
+      },
+    });
+
+    if (!dbOrder) {
+      res.status(404).json({ success: false, message: 'Ödeme yapılacak sipariş bulunamadı.' });
+      return;
+    }
+
+    if (dbOrder.paymentStatus === PaymentStatus.PAID) {
+      res.status(400).json({ success: false, message: 'Bu siparişin ödemesi zaten başarıyla tahsil edilmiştir.' });
+      return;
+    }
+
+    // Doğrulanmış sunucu sipariş tutarı
+    const verifiedTotalAmount = Number(dbOrder.totalAmount);
+
+    if (!cardNumber || !expireMonth || !expireYear || !cvv || !cardHolderName) {
       res.status(400).json({ success: false, message: 'Kredi kartı bilgileri eksik veya geçersiz.' });
       return;
     }
 
-    let paymentResult: any;
+    const cleanCardNum = (cardNumber || '').replace(/\s+/g, '');
+    const cleanExpireMonth = (expireMonth || '12').toString().padStart(2, '0');
+    const cleanExpireYear = (expireYear || '2028').toString().length === 2 ? `20${expireYear}` : (expireYear || '2028').toString();
 
-    if (isSavedCard) {
-      // Tokenized / Saved Card Payment Simulation & Processing
-      const idempotencyKey = crypto.randomUUID();
-      paymentResult = {
-        status: 'success',
-        paymentId: `PAY-SAVED-${Date.now()}`,
-        idempotencyKey,
-        rawSignature: idempotencyKey,
-      };
-    } else {
-      const cleanCardNum = (cardNumber || '').replace(/\s+/g, '');
-      const cleanExpireMonth = (expireMonth || '12').toString().padStart(2, '0');
-      const cleanExpireYear = (expireYear || '2028').toString().length === 2 ? `20${expireYear}` : (expireYear || '2028').toString();
+    const verifiedBasketItems = dbOrder.items.map((item, idx) => ({
+      id: item.productId,
+      name: item.product?.name || `Mobilya Kalemi ${idx + 1}`,
+      category1: 'Mobilya',
+      price: Number(item.totalPrice || item.unitPrice),
+    }));
 
-      paymentResult = await executeIyzicoPayment({
-        conversationId: conversationId || `CONV-${Date.now()}`,
-        price: totalAmount,
-        paidPrice: totalAmount,
-        currency: 'TRY',
-        installment: Number(installment),
-        basketId: `BSK-${Date.now()}`,
-        basketItems: basketItems || [],
-        paymentCard: {
-          cardHolderName: cardHolderName || 'Müşteri',
-          cardNumber: cleanCardNum,
-          expireMonth: cleanExpireMonth,
-          expireYear: cleanExpireYear,
-          cvv: cvv || '000',
-        },
-        buyer: buyer || {
-          id: 'BYR-GUEST',
-          name: (cardHolderName || 'Müşteri').split(' ')[0] || 'Müşteri',
-          surname: (cardHolderName || 'Müşteri').split(' ')[1] || 'Soyadı',
-          gsmNumber: '+905320000000',
-          email: 'musteri@example.com',
-          identityNumber: '11111111110',
-          registrationAddress: 'Modoko Mobilyacılar Sitesi',
-          city: 'Istanbul',
-          country: 'Turkey',
-          ip: req.ip || '127.0.0.1',
-        },
-      });
-    }
+    const paymentResult = await executeIyzicoPayment({
+      conversationId: conversationId || `CONV-${dbOrder.id}`,
+      price: verifiedTotalAmount,
+      paidPrice: verifiedTotalAmount,
+      currency: 'TRY',
+      installment: Number(installment),
+      basketId: `BSK-${dbOrder.id}`,
+      basketItems: verifiedBasketItems,
+      paymentCard: {
+        cardHolderName: cardHolderName.trim(),
+        cardNumber: cleanCardNum,
+        expireMonth: cleanExpireMonth,
+        expireYear: cleanExpireYear,
+        cvv: cvv.trim(),
+      },
+      buyer: buyer || {
+        id: dbOrder.userId,
+        name: dbOrder.shippingAddress?.fullName?.split(' ')[0] || cardHolderName.split(' ')[0] || 'Müşteri',
+        surname: dbOrder.shippingAddress?.fullName?.split(' ').slice(1).join(' ') || 'Soyadı',
+        gsmNumber: dbOrder.shippingAddress?.phone || '+905320000000',
+        email: dbOrder.user?.email || 'musteri@ermaymobilya.com',
+        identityNumber: dbOrder.tcKn || '11111111110',
+        registrationAddress: dbOrder.shippingAddress?.addressLine || 'Modoko Mobilyacılar Sitesi',
+        city: dbOrder.shippingAddress?.city || 'Istanbul',
+        country: 'Turkey',
+        ip: req.ip || '127.0.0.1',
+      },
+    });
 
     if (paymentResult.status === 'success') {
-      if (orderId) {
-        await prisma.order.update({
-          where: { id: orderId },
-          data: {
-            paymentStatus: PaymentStatus.PAID,
-            orderStatus: OrderStatus.PREPARING,
-          },
-        });
-      }
+      await prisma.order.update({
+        where: { id: dbOrder.id },
+        data: {
+          paymentStatus: PaymentStatus.PAID,
+          orderStatus: OrderStatus.PREPARING,
+        },
+      });
 
       res.status(200).json({
         success: true,
@@ -96,28 +109,24 @@ export async function processCardPayment(req: Request, res: Response): Promise<v
         signature: paymentResult.rawSignature,
       });
     } else {
-      if (orderId) {
-        const failedOrder = await prisma.order.findUnique({
-          where: { id: orderId },
-          include: { items: true },
-        });
-        if (failedOrder && failedOrder.items) {
-          await releaseStockAtomic(
-            failedOrder.items.map((i) => ({
-              productId: i.productId,
-              variantId: i.variantId || undefined,
-              quantity: i.quantity,
-            }))
-          );
-          await prisma.order.update({
-            where: { id: orderId },
-            data: {
-              paymentStatus: PaymentStatus.FAILED,
-              orderStatus: OrderStatus.CANCELLED,
-            },
-          });
-        }
+      // Ödeme başarısız ise stokları geri iade et ve sipariş durumunu güncelle
+      if (dbOrder.items && dbOrder.items.length > 0) {
+        await releaseStockAtomic(
+          dbOrder.items.map((i) => ({
+            productId: i.productId,
+            variantId: i.variantId || undefined,
+            quantity: i.quantity,
+          }))
+        );
       }
+
+      await prisma.order.update({
+        where: { id: dbOrder.id },
+        data: {
+          paymentStatus: PaymentStatus.FAILED,
+          orderStatus: OrderStatus.CANCELLED,
+        },
+      });
 
       res.status(400).json({
         success: false,
@@ -126,41 +135,47 @@ export async function processCardPayment(req: Request, res: Response): Promise<v
       });
     }
   } catch (error) {
+    console.error('processCardPayment Hatası:', error);
     res.status(500).json({ success: false, message: 'Ödeme altyapısında bir sistem hatası oluştu.' });
   }
 }
 
 /**
  * Handle Atomic Iyzico Webhook / Callback Result
- * Updates Order & Payment Status in a Prisma Transaction
+ * Updates Order & Payment Status in a Prisma Transaction using Verified Token Data
  */
 export async function handleIyzicoWebhook(req: Request, res: Response): Promise<void> {
-  const token = req.body?.token || req.query?.token;
-  const orderId =
+  const token = (req.body?.token || req.query?.token) as string | undefined;
+  let orderId =
     (req.query?.orderId as string) ||
     req.body?.orderId ||
     (req.body?.conversationId ? String(req.body.conversationId).replace(/^CONV-/, '') : null);
-  const status = req.body?.status || req.query?.status;
-  const iyziEventType = req.body?.iyziEventType;
-  const iyziPaymentId = req.body?.iyziPaymentId || req.body?.paymentId;
 
-  console.log(`[Iyzico Webhook Callback] Event: ${iyziEventType}, PaymentID: ${iyziPaymentId}, Status: ${status}, OrderId: ${orderId}, Token: ${token}`);
+  let isSuccess =
+    req.body?.status === 'SUCCESS' ||
+    req.body?.status === 'success' ||
+    req.body?.iyziEventType === 'payment.success';
 
-  if (!orderId && !token) {
-    res.status(200).json({ status: 'OK', note: 'Webhook received without orderId or token' });
-    return;
-  }
+  console.log(`[Iyzico Webhook / Callback] Token: ${token}, OrderId: ${orderId}, Status: ${req.body?.status}`);
 
   try {
-    const isSuccess =
-      status === 'SUCCESS' ||
-      status === 'success' ||
-      iyziEventType === 'payment.success' ||
-      req.body?.paymentStatus === 'SUCCESS';
+    // If Iyzico Checkout Form token is present, retrieve authentic payment data directly from Iyzico API
+    if (token) {
+      const tokenResult = await retrieveCheckoutFormResult(token);
+      if (tokenResult.conversationId) {
+        orderId = tokenResult.conversationId.replace(/^CONV-/, '');
+      }
+      isSuccess = tokenResult.status === 'success';
+    }
+
+    if (!orderId) {
+      res.status(200).json({ status: 'OK', note: 'Webhook received without orderId' });
+      return;
+    }
 
     await prisma.$transaction(async (tx) => {
-      const order = await tx.order.findFirst({
-        where: orderId ? { id: orderId } : { orderNumber: { contains: String(token).slice(0, 10) } },
+      const order = await tx.order.findUnique({
+        where: { id: orderId },
         include: { items: true },
       });
 
