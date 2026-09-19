@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
+import { telegramService } from '../services/telegram.service';
 
 export async function getCmsBlock(req: Request, res: Response): Promise<void> {
   try {
@@ -63,3 +64,15 @@ export async function updateCmsBlock(req: Request, res: Response): Promise<void>
     res.status(500).json({ success: false, message: msg });
   }
 }
+
+export async function testTelegramConnection(req: Request, res: Response): Promise<void> {
+  try {
+    const { botToken, chatId } = req.body;
+    const result = await telegramService.sendTestMessage(botToken, chatId);
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Telegram test işlemi başarısız.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+

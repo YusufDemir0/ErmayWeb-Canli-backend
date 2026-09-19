@@ -5,7 +5,8 @@ import {
   getAllOrders, 
   updateOrderStatus, 
   uploadReceipt, 
-  approveOrderPayment 
+  approveOrderPayment,
+  triggerDailySalesReport 
 } from '../controllers/order.controller';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validate.middleware';
@@ -22,5 +23,6 @@ router.post('/:id/receipt', authenticateToken, uploadReceipt);
 router.get('/all', authenticateToken, authorizeRoles('ADMIN'), getAllOrders);
 router.patch('/:id/status', authenticateToken, authorizeRoles('ADMIN'), validateRequest(UpdateOrderStatusSchema), updateOrderStatus);
 router.post('/:id/approve-payment', authenticateToken, authorizeRoles('ADMIN'), approveOrderPayment);
+router.post('/daily-report', authenticateToken, authorizeRoles('ADMIN'), triggerDailySalesReport);
 
 export default router;

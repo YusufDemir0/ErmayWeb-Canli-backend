@@ -4,6 +4,9 @@ import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import { reserveStockAtomic, releaseStockAtomic } from '../services/stock.service';
 import { validateOrderStateTransition } from '../services/orderStateMachine.service';
+import { telegramService } from '../services/telegram.service';
+import { emailService } from '../services/email.service';
+import { dailyReportService } from '../services/dailyReport.service';
 import { OrderStatus, PaymentMethod, PaymentStatus, InvoiceType } from '@prisma/client';
 import { calculateOrderFinancials, toKurus } from '../utils/financial';
 
@@ -27,6 +30,9 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
     taxOffice,
     paymentMethod,
     couponCode,
+    deviceInfo,
+    regionCode,
+    kvkkAccepted,
   } = req.body;
 
   if (!items || items.length === 0) {
@@ -38,6 +44,16 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
     res.status(401).json({ success: false, message: 'Sipariş vermek için giriş yapmalısınız.' });
     return;
   }
+
+  // Combine client-detected device info with server-side network signals
+  const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '127.0.0.1';
+  const serverAgent = req.headers['user-agent'] || 'Bilinmiyor';
+  const enrichedDeviceInfo = {
+    ...(typeof deviceInfo === 'object' && deviceInfo !== null ? deviceInfo : {}),
+    ip: clientIp,
+    userAgent: serverAgent,
+    capturedAt: new Date().toISOString(),
+  };
 
     // 1. Ürün ve Adres Doğrulamalarını Stok Rezerve Etmeden ÖNCE Yap
     let addressId = shippingAddressId;
@@ -179,10 +195,9 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
       const financials = calculateOrderFinancials(itemCalculationInputs, calculatedCouponKurus);
 
       const year = new Date().getFullYear();
-      const epochSuffix = Math.floor(Date.now() / 1000).toString().slice(-5);
-      const entropy = crypto.randomBytes(3).toString('hex').toUpperCase();
-      const orderNumber = `ORD-${year}${epochSuffix}-${entropy}`;
-      const invoiceNumber = `ERM-${year}${epochSuffix}-${entropy}`;
+      const randomSeq = Math.floor(100000 + Math.random() * 900000);
+      const orderNumber = `ERM-${year}-${randomSeq}`;
+      const invoiceNumber = `ERM${year}${randomSeq}`;
 
       const newOrder = await prisma.$transaction(async (tx) => {
         if (couponIdToIncrement) {
@@ -209,6 +224,9 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
             companyTitle: invoiceType === 'CORPORATE' ? companyTitle : null,
             taxNo: invoiceType === 'CORPORATE' ? taxNo : null,
             taxOffice: invoiceType === 'CORPORATE' ? taxOffice : null,
+            deviceInfo: enrichedDeviceInfo,
+            regionCode: typeof regionCode === 'string' ? regionCode : null,
+            kvkkAccepted: Boolean(kvkkAccepted ?? true),
             items: {
               create: orderItemsData,
             },
@@ -218,9 +236,62 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
               include: { product: true },
             },
             shippingAddress: true,
+            user: {
+              select: { id: true, name: true, email: true, phone: true },
+            },
           },
         });
       });
+
+      // 1. Asynchronous Telegram Real-time Order Alert
+      telegramService
+        .notifyNewOrder({
+          orderNumber: newOrder.orderNumber,
+          customerName: newOrder.shippingAddress?.fullName || newOrder.user?.name || 'Değerli Müşteri',
+          customerPhone: newOrder.shippingAddress?.phone || newOrder.user?.phone || '-',
+          totalAmount: Number(newOrder.totalAmount),
+          paymentMethod: String(newOrder.paymentMethod),
+          city: newOrder.shippingAddress?.city,
+          district: newOrder.shippingAddress?.district,
+          regionCode: newOrder.regionCode || undefined,
+          deviceInfo: (newOrder.deviceInfo as any) || undefined,
+          items: newOrder.items.map((i) => ({
+            name: i.product?.name || 'Mobilya',
+            quantity: i.quantity,
+            price: Number(i.totalPrice),
+          })),
+        })
+        .catch((err) => console.error('[TELEGRAM BG ERROR]', err));
+
+      // 2. Asynchronous Customer Order Confirmation Email
+      if (newOrder.user?.email || req.body.customerEmail) {
+        const targetEmail = newOrder.user?.email || req.body.customerEmail;
+        emailService
+          .sendOrderConfirmation({
+            orderNumber: newOrder.orderNumber,
+            customerName: newOrder.shippingAddress?.fullName || newOrder.user?.name || 'Değerli Müşteri',
+            customerEmail: targetEmail,
+            customerPhone: newOrder.shippingAddress?.phone || newOrder.user?.phone || '-',
+            totalAmount: Number(newOrder.totalAmount),
+            taxAmount: Number(newOrder.taxAmount),
+            discountAmount: Number(newOrder.discountAmount),
+            paymentMethod: String(newOrder.paymentMethod),
+            shippingAddress: {
+              fullName: newOrder.shippingAddress?.fullName || 'Değerli Müşteri',
+              phone: newOrder.shippingAddress?.phone || '-',
+              city: newOrder.shippingAddress?.city || 'İstanbul',
+              district: newOrder.shippingAddress?.district || 'Modoko',
+              addressLine: newOrder.shippingAddress?.addressLine || 'Adres detayı',
+            },
+            items: newOrder.items.map((i) => ({
+              name: i.product?.name || 'Mobilya',
+              quantity: i.quantity,
+              unitPrice: Number(i.unitPrice),
+              totalPrice: Number(i.totalPrice),
+            })),
+          })
+          .catch((err) => console.error('[EMAIL BG ERROR]', err));
+      }
 
       res.status(201).json({
         success: true,
@@ -433,5 +504,15 @@ export async function updateOrderStatus(req: AuthenticatedRequest, res: Response
       success: false,
       message: msg,
     });
+  }
+}
+
+export async function triggerDailySalesReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const result = await dailyReportService.generateAndSendDailyReport();
+    res.status(200).json(result);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Günlük rapor oluşturulamadı.';
+    res.status(500).json({ success: false, message: msg });
   }
 }

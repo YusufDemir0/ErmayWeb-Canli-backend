@@ -112,6 +112,12 @@ model Product {
   images        String[] @default([])
   features      String[]
   vatRate       Decimal  @default(0.20) @db.Decimal(4, 2)
+  widthCm       Int?     // Genişlik (X) cm
+  depthCm       Int?     // Derinlik (Y) cm
+  heightCm      Int?     // Yükseklik (Z) cm
+  drawerCount   Int?     @default(0) // Çekmece sayısı
+  unitCount     Int?     @default(1) // Ünite/parça sayısı
+  colors        String[] @default([]) // Mevcut renk seçenekleri
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -180,6 +186,11 @@ model Order {
   // Shipping & Cargo details
   shippingCarrier String?
   trackingNumber  String?
+
+  // Device & Regional & KVKK Audit Details
+  deviceInfo   Json?    // { deviceType: 'Mobile'|'Laptop'|'Desktop', os, browser, screenResolution, ip, userAgent }
+  regionCode   String?  // e.g. "34-MAR", "06-ICA"
+  kvkkAccepted Boolean  @default(true)
 
   items          OrderItem[]
   returnRequests ReturnRequest[]

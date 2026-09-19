@@ -29,6 +29,12 @@ export const CreateProductSchema = z.object({
   image3: z.string().optional(),
   features: z.array(z.string()).optional(),
   vatRate: z.coerce.number().optional(),
+  widthCm: z.coerce.number().optional().nullable(),
+  depthCm: z.coerce.number().optional().nullable(),
+  heightCm: z.coerce.number().optional().nullable(),
+  drawerCount: z.coerce.number().optional().nullable(),
+  unitCount: z.coerce.number().optional().nullable(),
+  colors: z.array(z.string()).optional(),
 });
 
 export const UpdateProductSchema = CreateProductSchema.partial();
@@ -104,6 +110,9 @@ export const CreateOrderSchema = z.object({
   totalAmount: z.number().positive().optional(),
   discountAmount: z.number().optional(),
   receiptUrl: z.string().optional(),
+  deviceInfo: z.record(z.unknown()).optional(),
+  regionCode: z.string().optional(),
+  kvkkAccepted: z.boolean().optional(),
 });
 
 export const UpdateOrderStatusSchema = z.object({
