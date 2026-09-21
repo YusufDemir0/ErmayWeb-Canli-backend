@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
+import { getOrSetCache, invalidateCachePattern, delCache } from '../utils/cache';
 
 export async function getProducts(req: Request, res: Response): Promise<void> {
   try {
@@ -11,70 +12,96 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10)));
     const skip = (pageNum - 1) * limitNum;
 
-    const where: Prisma.ProductWhereInput = {};
+    const cacheKey = `products:list:${pageNum}:${limitNum}:${category || ''}:${search || ''}:${minPrice || ''}:${maxPrice || ''}:${sort || ''}:${req.query.includeUnpublished || ''}`;
 
-    if (category && category !== 'all' && category !== 'hepsi') {
-      const catParam = (category as string).trim();
-      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(catParam);
+    const cachedResult = await getOrSetCache(cacheKey, 120, async () => {
+      const where: Prisma.ProductWhereInput = {};
+      const andFilters: Prisma.ProductWhereInput[] = [];
 
-      if (isUuid) {
-        where.categoryId = catParam;
-      } else {
-        const slug = slugifyTurkish(catParam);
-        where.category = {
-          OR: [
-            { slug: catParam.toLowerCase() },
-            { slug: slug },
-          ],
-        };
+      const includeUnpublished = req.query.includeUnpublished === 'true';
+      if (!includeUnpublished) {
+        andFilters.push({
+          isPublished: true,
+          image: { not: '' },
+        });
       }
-    }
 
-    if (search) {
-      const q = (search as string).trim();
-      where.OR = [
-        { name: { contains: q, mode: 'insensitive' } },
-        { description: { contains: q, mode: 'insensitive' } },
-        { material: { contains: q, mode: 'insensitive' } },
-      ];
-    }
+      if (category && category !== 'all' && category !== 'hepsi') {
+        const catParam = (category as string).trim();
+        const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(catParam);
 
-    if (minPrice || maxPrice) {
-      where.price = {};
-      if (minPrice) where.price.gte = parseFloat(minPrice as string);
-      if (maxPrice) where.price.lte = parseFloat(maxPrice as string);
-    }
+        if (isUuid) {
+          andFilters.push({ categoryId: catParam });
+        } else {
+          const slug = slugifyTurkish(catParam);
+          andFilters.push({
+            category: {
+              OR: [
+                { slug: catParam.toLowerCase() },
+                { slug: slug },
+              ],
+            },
+          });
+        }
+      }
 
-    let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
-    if (sort === 'price_asc') orderBy = { price: 'asc' };
-    if (sort === 'price_desc') orderBy = { price: 'desc' };
-    if (sort === 'popular') orderBy = { salesCount: 'desc' };
+      if (search) {
+        const q = (search as string).trim();
+        andFilters.push({
+          OR: [
+            { name: { contains: q, mode: 'insensitive' } },
+            { description: { contains: q, mode: 'insensitive' } },
+            { material: { contains: q, mode: 'insensitive' } },
+          ],
+        });
+      }
 
-    const [products, totalCount] = await Promise.all([
-      prisma.product.findMany({
-        where,
-        orderBy,
-        skip,
-        take: limitNum,
-        include: {
-          category: {
-            select: { id: true, name: true, slug: true },
+      if (minPrice || maxPrice) {
+        const priceFilter: Prisma.DecimalFilter = {};
+        if (minPrice) priceFilter.gte = parseFloat(minPrice as string);
+        if (maxPrice) priceFilter.lte = parseFloat(maxPrice as string);
+        andFilters.push({ price: priceFilter });
+      }
+
+      if (andFilters.length > 0) {
+        where.AND = andFilters;
+      }
+
+      let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
+      if (sort === 'price_asc') orderBy = { price: 'asc' };
+      if (sort === 'price_desc') orderBy = { price: 'desc' };
+      if (sort === 'popular') orderBy = { salesCount: 'desc' };
+
+      const [products, totalCount] = await Promise.all([
+        prisma.product.findMany({
+          where,
+          orderBy,
+          skip,
+          take: limitNum,
+          include: {
+            category: {
+              select: { id: true, name: true, slug: true },
+            },
+            variants: true,
           },
-          variants: true,
+        }),
+        prisma.product.count({ where }),
+      ]);
+
+      return {
+        pagination: {
+          total: totalCount,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: Math.ceil(totalCount / limitNum),
         },
-      }),
-      prisma.product.count({ where }),
-    ]);
+        products,
+      };
+    });
 
     res.status(200).json({
       success: true,
-      pagination: {
-        total: totalCount,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(totalCount / limitNum),
-      },
-      products,
+      ...cachedResult,
     });
   } catch (error: unknown) {
     console.error('Ürün Listeleme Hatası:', error);
@@ -85,19 +112,31 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
 export async function getProductById(req: Request, res: Response): Promise<void> {
   try {
     const productId = req.params.id as string;
+    const includeUnpublished = req.query.includeUnpublished === 'true';
+    const cacheKey = `products:detail:${productId}:${includeUnpublished}`;
 
-    const product = await prisma.product.findFirst({
-      where: {
-        OR: [{ id: productId }, { slug: productId }],
-      },
-      include: {
-        category: true,
-        variants: true,
-      },
+    const product = await getOrSetCache(cacheKey, 300, async () => {
+      return prisma.product.findFirst({
+        where: {
+          OR: [{ id: productId }, { slug: productId }],
+        },
+        include: {
+          category: true,
+          variants: true,
+        },
+      });
     });
 
     if (!product) {
       res.status(404).json({ success: false, message: 'İstenen ürün bulunamadı.' });
+      return;
+    }
+
+    if (!product.isPublished && !includeUnpublished) {
+      res.status(404).json({
+        success: false,
+        message: 'Bu mobilya modeli şu anda satışta değildir veya geçici olarak yayından kaldırılmıştır.',
+      });
       return;
     }
 
@@ -143,7 +182,7 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       ? [image]
       : [];
 
-    const mainImage = image || normalizedImages[0] || 'https://images.unsplash.com/photo-1555041469-a586c61ea9bc?auto=format&fit=crop&q=80&w=1000';
+    const mainImage = image || normalizedImages[0] || '/default-furniture.webp';
 
     const stockNum = stock !== undefined && stock !== '' ? parseInt(String(stock), 10) : 10;
 
@@ -168,6 +207,8 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       data: createInput,
     });
 
+    await invalidateCachePattern('products:*');
+
     res.status(201).json({ success: true, message: 'Ürün başarıyla eklendi.', product });
   } catch (error: unknown) {
     console.error('Ürün Ekleme Hatası:', error);
@@ -179,7 +220,7 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
 export async function updateProduct(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
-    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, inStock, image, images, features, vatRate } = req.body;
+    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, inStock, image, images, features, vatRate, isPublished } = req.body;
 
     const dataToUpdate: Prisma.ProductUpdateInput = {};
     if (name) dataToUpdate.name = name;
@@ -222,11 +263,14 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
     }
     if (features !== undefined) dataToUpdate.features = Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : [];
     if (vatRate !== undefined) dataToUpdate.vatRate = parseFloat(vatRate);
+    if (isPublished !== undefined) dataToUpdate.isPublished = Boolean(isPublished);
 
     const product = await prisma.product.update({
       where: { id },
       data: dataToUpdate,
     });
+
+    await invalidateCachePattern('products:*');
 
     res.status(200).json({ success: true, message: 'Ürün güncellendi.', product });
   } catch (error: unknown) {
@@ -243,6 +287,8 @@ export async function deleteProduct(req: Request, res: Response): Promise<void> 
     await prisma.product.delete({
       where: { id },
     });
+
+    await invalidateCachePattern('products:*');
 
     res.status(200).json({ success: true, message: 'Ürün silindi.' });
   } catch (error: unknown) {

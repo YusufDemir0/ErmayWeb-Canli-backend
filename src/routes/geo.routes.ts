@@ -1,9 +1,82 @@
 import { Router, Request, Response } from 'express';
 import { redis } from '../config/redis';
+import { prisma } from '../config/database';
 
 const router = Router();
 const inMemoryGeoCache = new Map<string, { data: unknown; timestamp: number }>();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+export interface DeliveryZonesConfig {
+  disabledCityIds: number[];
+  disabledCityNames: string[];
+  noticeMessage?: string;
+  updatedAt?: string;
+}
+
+/**
+ * GET /api/v1/geo/delivery-zones
+ * Returns the currently active delivery zones configuration (disabled cities, announcements).
+ */
+router.get('/delivery-zones', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const block = await prisma.cmsBlock.findUnique({
+      where: { key: 'delivery_zones' },
+    });
+
+    if (!block || !block.content) {
+      res.status(200).json({
+        success: true,
+        zones: {
+          disabledCityIds: [],
+          disabledCityNames: [],
+          noticeMessage: '',
+        },
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      zones: block.content,
+      data: block.content,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Teslimat bölgeleri verisi alınamadı.';
+    res.status(500).json({ success: false, message: msg });
+  }
+});
+
+/**
+ * PUT /api/v1/geo/delivery-zones
+ * Update which cities are enabled/disabled for shipping & assembly.
+ */
+router.put('/delivery-zones', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { disabledCityIds = [], disabledCityNames = [], noticeMessage = '' } = req.body;
+
+    const payload = {
+      disabledCityIds: Array.isArray(disabledCityIds) ? disabledCityIds.map(Number) : [],
+      disabledCityNames: Array.isArray(disabledCityNames) ? disabledCityNames.map(String) : [],
+      noticeMessage: typeof noticeMessage === 'string' ? noticeMessage.trim() : '',
+      updatedAt: new Date().toISOString(),
+    };
+
+    const savedBlock = await prisma.cmsBlock.upsert({
+      where: { key: 'delivery_zones' },
+      update: { content: payload },
+      create: { key: 'delivery_zones', content: payload },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Teslimat ve şehir hizmet durumu başarıyla güncellendi.',
+      zones: savedBlock.content,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Teslimat bölgeleri güncellenemedi.';
+    res.status(500).json({ success: false, message: msg });
+  }
+});
 
 router.get('/reverse', async (req: Request, res: Response): Promise<void> => {
   try {

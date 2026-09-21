@@ -2,13 +2,23 @@ import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
+import { getOrSetCache, invalidateCachePattern } from '../utils/cache';
+
+const CATEGORIES_CACHE_KEY = 'categories:all';
+const CATEGORIES_CACHE_TTL = 3600; // 1 hour
 
 export async function getCategories(req: Request, res: Response): Promise<void> {
   try {
-    const categories = await prisma.category.findMany({
-      orderBy: { name: 'asc' },
-      include: { children: true },
-    });
+    const categories = await getOrSetCache(
+      CATEGORIES_CACHE_KEY,
+      CATEGORIES_CACHE_TTL,
+      async () => {
+        return prisma.category.findMany({
+          orderBy: { name: 'asc' },
+          include: { children: true },
+        });
+      }
+    );
     res.status(200).json({ success: true, categories });
   } catch (error: unknown) {
     res.status(500).json({ success: false, message: 'Kategoriler yüklenemedi.' });
@@ -34,6 +44,8 @@ export async function createCategory(req: Request, res: Response): Promise<void>
         parentId: parentId || null,
       },
     });
+
+    await invalidateCachePattern('categories:*');
 
     res.status(201).json({ success: true, message: 'Kategori eklendi.', category });
   } catch (error: unknown) {
@@ -61,6 +73,8 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
       data: dataToUpdate,
     });
 
+    await invalidateCachePattern('categories:*');
+
     res.status(200).json({ success: true, message: 'Kategori güncellendi.', category });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Kategori güncellenemedi.';
@@ -85,6 +99,7 @@ export async function deleteCategory(req: Request, res: Response): Promise<void>
     }
 
     await prisma.category.delete({ where: { id } });
+    await invalidateCachePattern('categories:*');
     res.status(200).json({ success: true, message: 'Kategori başarıyla silindi.' });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Kategori silinemedi.';

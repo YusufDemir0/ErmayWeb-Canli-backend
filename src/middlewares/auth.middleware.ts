@@ -47,3 +47,30 @@ export function authorizeRoles(...roles: string[]) {
     next();
   };
 }
+
+export function authenticateOptionalToken(req: AuthenticatedRequest, _res: Response, next: NextFunction): void {
+  let token: string | undefined;
+
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.split(' ')[1];
+  }
+
+  if (!token && req.headers.cookie) {
+    const cookies = req.headers.cookie.split(';').reduce((acc: Record<string, string>, cur) => {
+      const [k, v] = cur.trim().split('=');
+      if (k && v) acc[k] = decodeURIComponent(v);
+      return acc;
+    }, {});
+    token = cookies['auth_token'] || cookies['admin_jwt_token'];
+  }
+
+  if (token) {
+    try {
+      req.user = verifyToken(token);
+    } catch {
+      // Non-blocking for optional auth
+    }
+  }
+  next();
+}

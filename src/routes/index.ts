@@ -10,6 +10,7 @@ import couponRoutes from './coupon.routes';
 import uploadRoutes from './upload.routes';
 import storeRoutes from './store.routes';
 import reviewRoutes from './review.routes';
+import erpIntegrationRoutes from './erpIntegration.routes';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/cms', cmsRoutes);
 router.use('/upload', uploadRoutes);
 router.use('/stores', storeRoutes);
 router.use('/reviews', reviewRoutes);
+router.use('/integration', erpIntegrationRoutes);
 
 export default router;

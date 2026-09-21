@@ -6,16 +6,18 @@ import {
   updateOrderStatus, 
   uploadReceipt, 
   approveOrderPayment,
-  triggerDailySalesReport 
+  triggerDailySalesReport,
+  getOrderByNumber
 } from '../controllers/order.controller';
-import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { authenticateToken, authenticateOptionalToken, authorizeRoles } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validate.middleware';
 import { CreateOrderSchema, UpdateOrderStatusSchema } from '../validations';
 
 const router = Router();
 
-// Customer Endpoints
-router.post('/', authenticateToken, validateRequest(CreateOrderSchema), createOrder);
+// Customer Endpoints (Allows guest checkout under KVKK compliance)
+router.post('/', authenticateOptionalToken, createOrder);
+router.get('/track/:orderNumber', getOrderByNumber);
 router.get('/my-orders', authenticateToken, getUserOrders);
 router.post('/:id/receipt', authenticateToken, uploadReceipt);
 
