@@ -47,7 +47,7 @@ export async function createProductReview(req: AuthenticatedRequest, res: Respon
     }
 
     const safeRating = Math.max(1, Math.min(5, Number(rating) || 5));
-    const safeUserName = (userName || (req.user as any)?.name || 'Değerli Müşterimiz').trim();
+    const safeUserName = (userName || (req.user as { name?: string } | undefined)?.name || 'Değerli Müşterimiz').trim();
 
     const newReview = await prisma.review.create({
       data: {

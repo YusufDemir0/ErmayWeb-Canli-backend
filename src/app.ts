@@ -9,6 +9,7 @@ import crypto from 'crypto';
 import routes from './routes';
 import { redis } from './config/redis';
 import { prisma } from './config/database';
+import { imageOptimizerMiddleware } from './middlewares/imageOptimizer.middleware';
 
 export const app = express();
 
@@ -118,7 +119,8 @@ app.use(limiter);
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
-// 10. High-Performance Static Media with Browser Caching (30 Days Immutable)
+// 10. High-Performance Static Media with On-The-Fly WebP Sharp Optimization
+app.use('/uploads', imageOptimizerMiddleware);
 app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   maxAge: '30d',
   immutable: true,

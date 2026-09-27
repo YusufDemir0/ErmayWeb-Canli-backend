@@ -1,13 +1,19 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { telegramService } from '../services/telegram.service';
+import { getOrSetCache, delCache } from '../utils/cache';
+
+const CMS_ALL_CACHE_KEY = 'cms:all';
+const CMS_CACHE_TTL = 3600; // 1 hour
 
 export async function getCmsBlock(req: Request, res: Response): Promise<void> {
   try {
     const key = req.params.key as string;
 
-    const block = await prisma.cmsBlock.findUnique({
-      where: { key },
+    const block = await getOrSetCache(`cms:block:${key}`, CMS_CACHE_TTL, async () => {
+      return prisma.cmsBlock.findUnique({
+        where: { key },
+      });
     });
 
     if (!block) {
@@ -25,11 +31,15 @@ export async function getCmsBlock(req: Request, res: Response): Promise<void> {
 
 export async function getAllCmsBlocks(req: Request, res: Response): Promise<void> {
   try {
-    const blocks = await prisma.cmsBlock.findMany();
-    const result: Record<string, unknown> = {};
-    for (const b of blocks) {
-      result[b.key] = b.content;
-    }
+    const result = await getOrSetCache(CMS_ALL_CACHE_KEY, CMS_CACHE_TTL, async () => {
+      const blocks = await prisma.cmsBlock.findMany();
+      const map: Record<string, unknown> = {};
+      for (const b of blocks) {
+        map[b.key] = b.content;
+      }
+      return map;
+    });
+
     res.status(200).json({ success: true, cms: result });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Tüm CMS içerikleri alınamadı.';
@@ -52,6 +62,12 @@ export async function updateCmsBlock(req: Request, res: Response): Promise<void>
       update: { content },
       create: { key, content },
     });
+
+    // Invalidate Redis caches
+    await Promise.all([
+      delCache(CMS_ALL_CACHE_KEY),
+      delCache(`cms:block:${key}`),
+    ]).catch(() => {});
 
     res.status(200).json({
       success: true,

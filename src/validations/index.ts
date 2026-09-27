@@ -13,14 +13,16 @@ export const RegisterSchema = z.object({
 });
 
 export const CreateProductSchema = z.object({
+  id: z.string().optional(),
   name: z.string().min(2, 'Ürün adı en az 2 karakter olmalıdır.'),
   price: z.coerce.number().positive('Fiyat 0\'dan büyük olmalıdır.'),
   originalPrice: z.coerce.number().optional().nullable(),
   categoryId: z.string().optional(),
-  category: z.string().optional(), // ✅ Zod'un category slug'ını silmesini engeller
+  category: z.union([z.string(), z.record(z.unknown())]).optional(),
   description: z.string().optional(),
   material: z.string().optional(),
   dimensions: z.string().optional(),
+  dimensionSpec: z.unknown().optional(),
   stock: z.coerce.number().int().nonnegative().optional(),
   image: z.string().optional(),
   images: z.array(z.string()).optional(),
@@ -35,10 +37,23 @@ export const CreateProductSchema = z.object({
   heightCm: z.coerce.number().optional().nullable(),
   drawerCount: z.coerce.number().optional().nullable(),
   unitCount: z.coerce.number().optional().nullable(),
-  colors: z.array(z.string()).optional(),
+  colors: z.array(z.union([z.string(), z.record(z.unknown())])).optional(),
+  setPieces: z.array(z.unknown()).optional(),
+  badge: z.string().optional(),
+  rating: z.number().optional(),
+  reviewsCount: z.number().optional(),
+  salesCount: z.number().optional(),
+  erpItemId: z.string().min(1, 'CRM ERP Ürün Eşleştirmesi (erpItemId) zorunludur.'),
+  erpItemCode: z.string().optional().nullable(),
 });
 
 export const UpdateProductSchema = CreateProductSchema.partial();
+
+export const BulkLinkSchema = z.object({
+  erpItemIds: z.array(z.string().min(1)).min(1, 'En az bir ERP ürünü seçilmelidir.'),
+  categoryId: z.string().min(1, 'Hedef kategori seçilmelidir.'),
+  isPublished: z.boolean().optional(),
+});
 
 export const CreateCategorySchema = z.object({
   name: z.string().min(2, 'Kategori adı en az 2 karakter olmalıdır.'),

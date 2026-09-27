@@ -120,8 +120,9 @@ function escapeHtml(text: string): string {
         console.warn('[TELEGRAM ERROR]:', resData);
         return { success: false, message: resData.description || 'Telegram bildirim hatası.' };
       }
-    } catch (error: any) {
-      console.error('[TELEGRAM NETWORK ERROR]:', error.message || error);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[TELEGRAM NETWORK ERROR]:', msg);
       return { success: false, message: 'Telegram sunucusuna erişilemedi.' };
     }
   }
@@ -168,8 +169,9 @@ function escapeHtml(text: string): string {
       } else {
         return { success: false, message: `Telegram Hatası: ${data.description}` };
       }
-    } catch (e: any) {
-      return { success: false, message: `Ağ Hatası: ${e.message || 'Telegram API ile iletişim kurulamadı.'}` };
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Telegram API ile iletişim kurulamadı.';
+      return { success: false, message: `Ağ Hatası: ${msg}` };
     }
   }
 }

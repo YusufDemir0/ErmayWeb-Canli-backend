@@ -3,13 +3,14 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
 import { getOrSetCache, invalidateCachePattern, delCache } from '../utils/cache';
+import { erpIntegrationService } from '../services/erpIntegration.service';
 
 export async function getProducts(req: Request, res: Response): Promise<void> {
   try {
-    const { category, search, minPrice, maxPrice, sort, page = '1', limit = '100' } = req.query;
+    const { category, search, minPrice, maxPrice, sort, page = '1', limit = '24' } = req.query;
 
     const pageNum = Math.max(1, parseInt(page as string, 10));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10)));
+    const limitNum = Math.min(48, Math.max(1, parseInt(limit as string, 10) || 24));
     const skip = (pageNum - 1) * limitNum;
 
     const cacheKey = `products:list:${pageNum}:${limitNum}:${category || ''}:${search || ''}:${minPrice || ''}:${maxPrice || ''}:${sort || ''}:${req.query.includeUnpublished || ''}`;
@@ -22,7 +23,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
       if (!includeUnpublished) {
         andFilters.push({
           isPublished: true,
-          image: { not: '' },
+          erpItemId: { not: null },
         });
       }
 
@@ -78,11 +79,35 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
           orderBy,
           skip,
           take: limitNum,
-          include: {
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+            price: true,
+            originalPrice: true,
+            stock: true,
+            inStock: true,
+            salesCount: true,
+            image: true,
+            images: true,
+            isPublished: true,
+            material: true,
+            widthCm: true,
+            heightCm: true,
+            depthCm: true,
+            erpItemId: true,
             category: {
               select: { id: true, name: true, slug: true },
             },
-            variants: true,
+            variants: {
+              select: {
+                id: true,
+                sku: true,
+                color: true,
+                price: true,
+                stock: true,
+              },
+            },
           },
         }),
         prisma.product.count({ where }),
@@ -148,18 +173,27 @@ export async function getProductById(req: Request, res: Response): Promise<void>
 
 export async function createProduct(req: Request, res: Response): Promise<void> {
   try {
-    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, image, images, features, vatRate } = req.body;
+    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, image, images, features, colors, vatRate, erpItemId, erpItemCode, widthCm, heightCm, depthCm } = req.body;
 
     if (!name || !price) {
       res.status(400).json({ success: false, message: 'Ürün adı ve fiyatı zorunludur.' });
       return;
     }
 
+    if (!erpItemId || String(erpItemId).trim() === '') {
+      res.status(400).json({
+        success: false,
+        message: 'CRM ERP sisteminde bulunmayan veya ERP ID (erpItemId) eşleşmesi yapılmamış ürün eklenemez. Lütfen ürünü ERP Sisteminden içe aktarınız / senkronize ediniz.',
+      });
+      return;
+    }
+
     let catId = categoryId;
     // Slug veya ID üzerinden dinamik kategori bulma:
-    if (!catId && category) {
+    const catSearch = typeof category === 'object' && category !== null ? (category as { id?: string; slug?: string }).id || (category as { id?: string; slug?: string }).slug : category;
+    if (!catId && catSearch) {
       const found = await prisma.category.findFirst({
-        where: { OR: [{ id: String(category) }, { slug: String(category) }] },
+        where: { OR: [{ id: String(catSearch) }, { slug: String(catSearch) }] },
       });
       if (found) catId = found.id;
     } else if (catId) {
@@ -174,20 +208,65 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       catId = firstCat ? firstCat.id : (await prisma.category.create({ data: { name: 'Genel', slug: 'genel' } })).id;
     }
 
-    const slug = slugifyTurkish(name) + '-' + Date.now().toString().slice(-6);
-
     const normalizedImages = Array.isArray(images)
       ? images.filter((img: unknown) => typeof img === 'string' && img.trim().length > 0)
       : image
       ? [image]
       : [];
 
-    const mainImage = image || normalizedImages[0] || '/default-furniture.webp';
-
+    const mainImage = image || normalizedImages[0] || '';
     const stockNum = stock !== undefined && stock !== '' ? parseInt(String(stock), 10) : 10;
 
+    const normalizedColors = Array.isArray(colors)
+      ? colors.map((c: unknown) => {
+          if (typeof c === 'string') return c;
+          if (c && typeof c === 'object' && 'name' in c && typeof (c as { name?: unknown }).name === 'string') {
+            return (c as { name: string }).name;
+          }
+          return JSON.stringify(c);
+        })
+      : [];
+
+    // ERP ID ile eşleşen mevcut bir ürün var mı kontrol et (Upsert mantığı)
+    const existingProduct = await prisma.product.findUnique({
+      where: { erpItemId: String(erpItemId) },
+    });
+
+    if (existingProduct) {
+      const updated = await prisma.product.update({
+        where: { id: existingProduct.id },
+        data: {
+          name: name.trim(),
+          category: { connect: { id: catId } },
+          description: description !== undefined ? description : existingProduct.description,
+          material: material || existingProduct.material,
+          dimensions: dimensions || existingProduct.dimensions,
+          price: parseFloat(price),
+          originalPrice: originalPrice ? parseFloat(originalPrice) : null,
+          stock: stockNum,
+          inStock: stockNum > 0,
+          image: mainImage,
+          images: normalizedImages.length > 0 ? normalizedImages : (mainImage ? [mainImage] : []),
+          features: Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : existingProduct.features,
+          colors: normalizedColors.length > 0 ? normalizedColors : existingProduct.colors,
+          vatRate: vatRate ? parseFloat(vatRate) : existingProduct.vatRate,
+          widthCm: widthCm ? parseInt(String(widthCm), 10) : existingProduct.widthCm,
+          heightCm: heightCm ? parseInt(String(heightCm), 10) : existingProduct.heightCm,
+          depthCm: depthCm ? parseInt(String(depthCm), 10) : existingProduct.depthCm,
+          erpItemCode: erpItemCode ? String(erpItemCode) : existingProduct.erpItemCode,
+          isPublished: true,
+        },
+      });
+
+      await invalidateCachePattern('products:*');
+      res.status(200).json({ success: true, message: 'ERP ile eşleşen ürün başarıyla güncellendi ve yayına alındı.', product: updated });
+      return;
+    }
+
+    const slug = slugifyTurkish(name) + '-' + Date.now().toString().slice(-6);
+
     const createInput: Prisma.ProductCreateInput = {
-      name,
+      name: name.trim(),
       slug,
       category: { connect: { id: catId } },
       description: description || '',
@@ -198,9 +277,16 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       stock: stockNum,
       inStock: stockNum > 0,
       image: mainImage,
-      images: normalizedImages.length > 0 ? normalizedImages : [mainImage],
+      images: normalizedImages.length > 0 ? normalizedImages : (mainImage ? [mainImage] : []),
       features: Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : [],
+      colors: normalizedColors,
       vatRate: vatRate ? parseFloat(vatRate) : 0.20,
+      widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
+      heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
+      depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+      erpItemId: String(erpItemId),
+      erpItemCode: erpItemCode ? String(erpItemCode) : null,
+      isPublished: true,
     };
 
     const product = await prisma.product.create({
@@ -213,14 +299,14 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
   } catch (error: unknown) {
     console.error('Ürün Ekleme Hatası:', error);
     const msg = error instanceof Error ? error.message : 'Ürün eklenirken bir hata oluştu.';
-    res.status(500).json({ success: false, message: msg });
+    res.status(400).json({ success: false, message: msg });
   }
 }
 
 export async function updateProduct(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
-    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, inStock, image, images, features, vatRate, isPublished } = req.body;
+    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, inStock, image, images, features, vatRate, isPublished, erpItemId, erpItemCode } = req.body;
 
     const dataToUpdate: Prisma.ProductUpdateInput = {};
     if (name) dataToUpdate.name = name;
@@ -264,6 +350,8 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
     if (features !== undefined) dataToUpdate.features = Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : [];
     if (vatRate !== undefined) dataToUpdate.vatRate = parseFloat(vatRate);
     if (isPublished !== undefined) dataToUpdate.isPublished = Boolean(isPublished);
+    if (erpItemId !== undefined) dataToUpdate.erpItemId = erpItemId ? String(erpItemId) : null;
+    if (erpItemCode !== undefined) dataToUpdate.erpItemCode = erpItemCode ? String(erpItemCode) : null;
 
     const product = await prisma.product.update({
       where: { id },
@@ -294,6 +382,112 @@ export async function deleteProduct(req: Request, res: Response): Promise<void> 
   } catch (error: unknown) {
     console.error('Ürün Silme Hatası:', error);
     const msg = error instanceof Error ? error.message : 'Ürün silinemedi.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+export async function bulkLinkErpProducts(req: Request, res: Response): Promise<void> {
+  try {
+    const { erpItemIds, categoryId, isPublished = true } = req.body;
+
+    if (!Array.isArray(erpItemIds) || erpItemIds.length === 0) {
+      res.status(400).json({ success: false, message: 'En az bir ERP ürünü seçilmelidir.' });
+      return;
+    }
+
+    if (!categoryId) {
+      res.status(400).json({ success: false, message: 'Hedef kategori seçilmelidir.' });
+      return;
+    }
+
+    // Kategori var mı doğrula (ID veya Slug üzerinden)
+    const targetCat = await prisma.category.findFirst({
+      where: { OR: [{ id: String(categoryId) }, { slug: String(categoryId) }] },
+    });
+
+    if (!targetCat) {
+      res.status(404).json({ success: false, message: 'Belirtilen hedef kategori bulunamadı.' });
+      return;
+    }
+
+    // CRM ERP'den güncel katalog bilgilerini çek (isim, fiyat vb. için)
+    const erpMap = new Map<string, { erpId: string; erpCode: string; erpName: string; erpSalePrice: number; erpStock: number }>();
+    try {
+      const erpItems = await erpIntegrationService.fetchErpItems();
+      for (const item of erpItems) {
+        erpMap.set(String(item.id), {
+          erpId: String(item.id),
+          erpCode: item.code,
+          erpName: item.name,
+          erpSalePrice: item.salePrice,
+          erpStock: item.totalStock,
+        });
+      }
+    } catch {
+      // ERP servisi o an erişilemezse sadece ID üzerinden bağlama yapılır
+    }
+
+    let processedCount = 0;
+
+    for (const rawErpId of erpItemIds) {
+      const erpIdStr = String(rawErpId).trim();
+      if (!erpIdStr) continue;
+
+      const erpInfo = erpMap.get(erpIdStr);
+      const existingProduct = await prisma.product.findUnique({
+        where: { erpItemId: erpIdStr },
+      });
+
+      if (existingProduct) {
+        await prisma.product.update({
+          where: { id: existingProduct.id },
+          data: {
+            categoryId: targetCat.id,
+            isPublished: Boolean(isPublished),
+            ...(erpInfo && {
+              erpItemCode: erpInfo.erpCode,
+            }),
+          },
+        });
+      } else {
+        const prodName = erpInfo?.erpName || `ERP Ürün #${erpIdStr}`;
+        const prodSlug = slugifyTurkish(prodName) + '-' + erpIdStr;
+        const prodPrice = erpInfo?.erpSalePrice ? Number(erpInfo.erpSalePrice) : 1000;
+        const prodStock = erpInfo?.erpStock ? Number(erpInfo.erpStock) : 10;
+
+        await prisma.product.create({
+          data: {
+            name: prodName,
+            slug: prodSlug,
+            categoryId: targetCat.id,
+            erpItemId: erpIdStr,
+            erpItemCode: erpInfo?.erpCode || null,
+            price: prodPrice,
+            stock: prodStock,
+            inStock: prodStock > 0,
+            image: '',
+            images: [],
+            description: `${prodName} - Ermay Mobilya Atölye Üretimi`,
+            material: 'Masif Ahşap & Kumaş',
+            dimensions: 'G: Standart | D: Standart | Y: Standart',
+            isPublished: Boolean(isPublished),
+          },
+        });
+      }
+      processedCount++;
+    }
+
+    await invalidateCachePattern('products:*');
+
+    res.status(200).json({
+      success: true,
+      message: `${processedCount} adet ERP ürünü "${targetCat.name}" kategorisine başarıyla bağlandı.`,
+      count: processedCount,
+      categoryId: targetCat.id,
+    });
+  } catch (error: unknown) {
+    console.error('Toplu Kategori Eşleme Hatası:', error);
+    const msg = error instanceof Error ? error.message : 'Toplu eşleme yapılırken bir hata oluştu.';
     res.status(500).json({ success: false, message: msg });
   }
 }

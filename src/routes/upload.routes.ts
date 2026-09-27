@@ -54,10 +54,12 @@ function isValidFileBuffer(buffer: Buffer, ext: string): boolean {
   return false;
 }
 
+import sharp from 'sharp';
+
 const router = Router();
 
-// Upload Route with Authentication & Strict File Verification
-router.post('/', authenticateToken, upload.single('file'), (req: Request, res: Response): void => {
+// Upload Route with Authentication, Magic Byte Verification, WebP Optimization & SHA-256 Deduplication
+router.post('/', authenticateToken, upload.single('file'), async (req: Request, res: Response): Promise<void> => {
   try {
     if (!req.file || !req.file.buffer) {
       res.status(400).json({ success: false, message: 'Lütfen geçerli bir dosya seçin.' });
@@ -79,18 +81,43 @@ router.post('/', authenticateToken, upload.single('file'), (req: Request, res: R
     const isPrivate = req.query.isPrivate === '1' || req.query.isPrivate === 'true' || req.body.isPrivate === 'true' || cleanExt === '.pdf';
     const targetDir = isPrivate ? privateUploadsDir : publicUploadsDir;
 
-    // High-entropy 256-bit cryptographically secure random filename
-    const randomHash = crypto.randomBytes(24).toString('hex');
-    const uniqueName = `${Date.now()}_${randomHash}${cleanExt}`;
-    const destinationPath = path.join(targetDir, uniqueName);
-    
-    fs.writeFileSync(destinationPath, req.file.buffer);
+    // Cryptographic SHA-256 hash for deduplication and unique collision-free naming
+    const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex').substring(0, 32);
+    const isImage = ['.jpg', '.jpeg', '.png', '.webp'].includes(cleanExt);
 
-    const fileUrl = isPrivate ? `/api/v1/upload/private/${uniqueName}` : `/uploads/${uniqueName}`;
+    let finalFileName = `${Date.now()}_${fileHash}${cleanExt}`;
+
+    if (isImage && !isPrivate) {
+      // Automatic upload-time WebP optimization & instant deduplication
+      finalFileName = `${fileHash}.webp`;
+      const destinationPath = path.join(targetDir, finalFileName);
+
+      if (fs.existsSync(destinationPath)) {
+        res.status(200).json({
+          success: true,
+          message: 'Görsel mevcut arşivden başarıyla eşleştirildi (Deduplicated).',
+          url: `/uploads/${finalFileName}`,
+          isPrivate: false,
+          deduplicated: true,
+        });
+        return;
+      }
+
+      await sharp(req.file.buffer)
+        .rotate()
+        .resize({ width: 1920, withoutEnlargement: true })
+        .webp({ quality: 82, effort: 4 })
+        .toFile(destinationPath);
+    } else {
+      const destinationPath = path.join(targetDir, finalFileName);
+      fs.writeFileSync(destinationPath, req.file.buffer);
+    }
+
+    const fileUrl = isPrivate ? `/api/v1/upload/private/${finalFileName}` : `/uploads/${finalFileName}`;
 
     res.status(200).json({
       success: true,
-      message: 'Dosya başarıyla doğrulandı ve yüklendi.',
+      message: 'Dosya başarıyla doğrulandı ve optimize edilerek yüklendi.',
       url: fileUrl,
       isPrivate,
     });

@@ -82,7 +82,7 @@ export async function reserveStockAtomic(items: ReserveStockItem[]): Promise<voi
       }
     }
 
-    // 2. PostgreSQL Atomik Stok Düşürme İşlemi
+    // 2. PostgreSQL Atomik Stok Düşürme İşlemi (Stok eksiye serbestçe düşebilir)
     await prisma.$transaction(async (tx) => {
       for (const item of items) {
         if (item.quantity <= 0) {
@@ -94,68 +94,43 @@ export async function reserveStockAtomic(items: ReserveStockItem[]): Promise<voi
             where: { id: item.variantId },
           });
 
-          if (!variant || variant.stock < item.quantity) {
-            throw new StockReservationError(
-              `Ürün varyantı stokta tükenmiş veya yetersiz. İstenen: ${item.quantity}, Mevcut: ${variant?.stock || 0}`
-            );
+          if (!variant) {
+            throw new StockReservationError('Ürün varyantı bulunamadı.');
           }
 
-          // Atomik varyant stok düşürme
-          const updatedVariant = await tx.productVariant.updateMany({
-            where: {
-              id: item.variantId,
-              stock: { gte: item.quantity },
-            },
+          // Atomik varyant stok düşürme (Stok negatif değerlere inebilir)
+          await tx.productVariant.update({
+            where: { id: item.variantId },
             data: {
               stock: { decrement: item.quantity },
             },
           });
 
-          if (updatedVariant.count === 0) {
-            throw new StockReservationError('Eşzamanlı sipariş nedeniyle ürün varyantı stoku tükendi.');
-          }
-
-          // Atomik ana ürün stok senkronizasyonu (Bellekte hesaplanan sabit sayı yerine atomic decrement)
-          const updatedParent = await tx.product.updateMany({
-            where: {
-              id: variant.productId,
-              stock: { gte: item.quantity },
-            },
+          // Atomik ana ürün stok senkronizasyonu
+          await tx.product.update({
+            where: { id: variant.productId },
             data: {
               stock: { decrement: item.quantity },
               salesCount: { increment: item.quantity },
             },
           });
-
-          if (updatedParent.count === 0) {
-            // Ana ürün stoku yetersiz kalırsa varyantı geri al
-            throw new StockReservationError('Ana ürün toplam stoku eşzamanlı sipariş nedeniyle tükendi.');
-          }
         } else {
           const product = await tx.product.findUnique({
             where: { id: item.productId },
           });
 
-          if (!product || product.stock < item.quantity || !product.inStock) {
-            throw new StockReservationError(
-              `"${product?.name || 'Ürün'}" stokta tükenmiş veya yetersiz. İstenen: ${item.quantity}, Mevcut: ${product?.stock || 0}`
-            );
+          if (!product) {
+            throw new StockReservationError('Sipariş edilmek istenen ürün bulunamadı.');
           }
 
-          const updatedProduct = await tx.product.updateMany({
-            where: {
-              id: item.productId,
-              stock: { gte: item.quantity },
-            },
+          // Atomik ana ürün stok düşürme (Stok negatif değerlere inebilir)
+          await tx.product.update({
+            where: { id: item.productId },
             data: {
               stock: { decrement: item.quantity },
               salesCount: { increment: item.quantity },
             },
           });
-
-          if (updatedProduct.count === 0) {
-            throw new StockReservationError(`"${product.name}" için eşzamanlı stok tükenmesi yaşandı.`);
-          }
         }
       }
     });

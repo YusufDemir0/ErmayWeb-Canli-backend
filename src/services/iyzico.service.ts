@@ -165,6 +165,19 @@ export async function executeIyzicoPayment(paymentData: IyzicoPaymentRequest): P
   });
 }
 
+interface IyzicoResult {
+  status: string;
+  errorMessage?: string;
+  checkoutFormContent?: string;
+  token?: string;
+  paymentStatus?: string;
+  paymentId?: string;
+  conversationId?: string;
+  basketId?: string;
+  price?: number;
+  paidPrice?: number;
+}
+
 /**
  * PCI-DSS Uyumlu Iyzico Responsive Checkout Form Başlatma
  */
@@ -230,7 +243,7 @@ export async function initializeCheckoutForm(paymentData: Omit<IyzicoPaymentRequ
   };
 
   return new Promise((resolve) => {
-    iyzipayClient.checkoutFormInitialize.create(requestPayload, (err: Error | null, result: any) => {
+    iyzipayClient.checkoutFormInitialize.create(requestPayload, (err: Error | null, result: IyzicoResult) => {
       if (err || !result) {
         resolve({
           status: 'failure',
@@ -274,7 +287,7 @@ export async function retrieveCheckoutFormResult(token: string): Promise<{
         locale: Iyzipay.LOCALE.TR,
         token,
       },
-      (err: Error | null, result: any) => {
+      (err: Error | null, result: IyzicoResult) => {
         if (err || !result) {
           resolve({
             status: 'failure',

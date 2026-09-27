@@ -85,22 +85,50 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
 export async function deleteCategory(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
+    const { reassignTo } = req.query;
 
-    const hasProducts = await prisma.product.findFirst({ where: { categoryId: id } });
-    if (hasProducts) {
-      res.status(400).json({ success: false, message: 'Bu kategoriye ait ürünler olduğu için silinemez! Lütfen önce ilişkili ürünleri siliniz veya başka bir kategoriye taşıyınız.' });
-      return;
+    const productCount = await prisma.product.count({ where: { categoryId: id } });
+    if (productCount > 0) {
+      let targetCatId = typeof reassignTo === 'string' && reassignTo ? reassignTo : null;
+      if (!targetCatId) {
+        const otherCat = await prisma.category.findFirst({
+          where: { id: { not: id } },
+          orderBy: { name: 'asc' },
+        });
+        if (otherCat) {
+          targetCatId = otherCat.id;
+        } else {
+          const defaultCat = await prisma.category.create({
+            data: { name: 'Genel', slug: 'genel', description: 'Genel Kategori' },
+          });
+          targetCatId = defaultCat.id;
+        }
+      }
+
+      await prisma.product.updateMany({
+        where: { categoryId: id },
+        data: { categoryId: targetCatId },
+      });
     }
 
     const hasChildren = await prisma.category.findFirst({ where: { parentId: id } });
     if (hasChildren) {
-      res.status(400).json({ success: false, message: 'Bu kategoriye ait alt kategoriler bulunmaktadır. Lütfen önce alt kategorileri siliniz veya taşıyınız.' });
-      return;
+      await prisma.category.updateMany({
+        where: { parentId: id },
+        data: { parentId: null },
+      });
     }
 
     await prisma.category.delete({ where: { id } });
     await invalidateCachePattern('categories:*');
-    res.status(200).json({ success: true, message: 'Kategori başarıyla silindi.' });
+    await invalidateCachePattern('products:*');
+
+    res.status(200).json({
+      success: true,
+      message: productCount > 0
+        ? `Kategori silindi. İçindeki ${productCount} adet ürün diğer kategoriye aktarıldı.`
+        : 'Kategori başarıyla silindi.',
+    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Kategori silinemedi.';
     res.status(500).json({ success: false, message: msg });

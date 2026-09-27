@@ -111,6 +111,43 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
   const itemsForErp: Array<{ itemId: string; quantity: number; price: number; name: string }> = [];
   let subTotalKurus = 0;
 
+  // Batch fetch all cart products in a single database query to prevent N+1 performance bottleneck
+  const requestedProductIds = [
+    ...new Set(
+      items.map((item: { productId?: string; product?: { id?: string } }) => item.productId || item.product?.id)
+    ),
+  ].filter((id): id is string => Boolean(id));
+
+  if (requestedProductIds.length === 0) {
+    res.status(400).json({
+      success: false,
+      message: 'Siparişteki ürünlerin geçerli bir kimlik bilgisi (productId) bulunamadı.',
+    });
+    return;
+  }
+
+  const dbProducts = await prisma.product.findMany({
+    where: { id: { in: requestedProductIds } },
+    select: {
+      id: true,
+      name: true,
+      price: true,
+      stock: true,
+      inStock: true,
+      vatRate: true,
+      erpItemId: true,
+      variants: {
+        select: {
+          id: true,
+          price: true,
+          stock: true,
+        },
+      },
+    },
+  });
+
+  const productMap = new Map(dbProducts.map((p) => [p.id, p]));
+
   for (const item of items) {
     const pId = item.productId || item.product?.id;
     if (!pId) {
@@ -121,15 +158,12 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
       return;
     }
 
-    const dbProduct = await prisma.product.findUnique({
-      where: { id: pId },
-      include: { variants: true },
-    });
+    const dbProduct = productMap.get(pId);
 
-    if (!dbProduct || !dbProduct.inStock) {
+    if (!dbProduct) {
       res.status(400).json({
         success: false,
-        message: `Sipariş edilmek istenen ürün (${pId || item.product?.name || 'Bilinmeyen'}) stokta yok veya satıştan kaldırılmıştır.`,
+        message: `Sipariş edilmek istenen ürün (${pId || item.product?.name || 'Bilinmeyen'}) sistemde bulunamadı.`,
       });
       return;
     }
@@ -166,8 +200,16 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
       totalPrice: Number((finalUnitPrice * item.quantity).toFixed(2)),
     });
 
+    if (!dbProduct.erpItemId || dbProduct.erpItemId.trim() === '') {
+      res.status(400).json({
+        success: false,
+        message: `"${dbProduct.name}" ürünü CRM ERP sisteminde tanımlı değildir veya ERP ID eşleşmesi eksiktir. CRM ERP ile eşlenmeyen ürünler satışa eklenemez.`,
+      });
+      return;
+    }
+
     itemsForErp.push({
-      itemId: dbProduct.erpItemId || '1',
+      itemId: dbProduct.erpItemId,
       quantity: item.quantity,
       price: finalUnitPrice,
       name: dbProduct.name,
@@ -241,31 +283,15 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
 
     const financials = calculateOrderFinancials(itemCalculationInputs, calculatedCouponKurus);
 
-    // 4. Generate Web Depo sequence (WDS00001, WDS00002...)
-    const lastWdsOrder = await prisma.order.findFirst({
-      where: { orderNumber: { startsWith: 'WDS' } },
-      orderBy: { createdAt: 'desc' },
-      select: { orderNumber: true },
-    });
-    let nextWdsSeq = 1;
-    if (lastWdsOrder?.orderNumber) {
-      const match = lastWdsOrder.orderNumber.match(/WDS(\d+)/i);
-      if (match && match[1]) {
-        nextWdsSeq = parseInt(match[1], 10) + 1;
-      }
-    }
-    const orderNumber = `WDS${String(nextWdsSeq).padStart(5, '0')}`;
-    const invoiceNumber = `FAT-${orderNumber}`;
-
-    // 5. Submit web order to ERP Web Depo
+    // 4. Submit web order to CRM ERP (MWDS Department & New Sanal Cari)
+    let orderNumber = '';
     let erpSaleId: string | null = null;
     let erpSaleCode: string | null = null;
 
     try {
       const erpRes = await erpIntegrationService.submitWebOrderToErp({
-        warehouse: 'Web Depo',
-        warehouseCode: 'WDS',
-        webOrderNumber: orderNumber,
+        warehouse: 'Web Depo Satış',
+        warehouseCode: 'MWDS',
         customerType: invoiceType === 'CORPORATE' ? 'CORPORATE' : 'INDIVIDUAL',
         fullName: finalCustomerName,
         phone1: finalPhone,
@@ -283,13 +309,40 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
       });
 
       if (erpRes && erpRes.saleCode) {
+        orderNumber = erpRes.saleCode;
         erpSaleId = erpRes.saleId;
         erpSaleCode = erpRes.saleCode;
-        console.log(`[ERP ORDER CREATED] Web Order: ${orderNumber} -> ERP Sale: ${erpSaleCode}, ID: ${erpSaleId}`);
+        console.log(`[ERP ORDER CREATED] MWDS Code: ${orderNumber}, ERP Sale ID: ${erpSaleId}, Party: ${erpRes.partyId}`);
       }
-    } catch (erpError: any) {
-      console.warn('[ERP INTEGRATION WARNING] Sale could not be synced immediately to ERP:', erpError.message);
+    } catch (erpError: unknown) {
+      const msg = erpError instanceof Error ? erpError.message : String(erpError);
+      console.warn('[ERP INTEGRATION WARNING] Sale could not be synced immediately to ERP:', msg);
     }
+
+    // 5. Fallback sequence if ERP connection is offline or failed to respond
+    if (!orderNumber) {
+      const lastMwdsOrder = await prisma.order.findFirst({
+        where: {
+          OR: [
+            { orderNumber: { startsWith: 'MWDS' } },
+            { orderNumber: { startsWith: 'WDS' } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { orderNumber: true },
+      });
+      let nextSeq = 1;
+      if (lastMwdsOrder?.orderNumber) {
+        const match = lastMwdsOrder.orderNumber.match(/(?:MWDS|WDS)(\d+)/i);
+        if (match && match[1]) {
+          nextSeq = parseInt(match[1], 10) + 1;
+        }
+      }
+      orderNumber = `MWDS${String(nextSeq).padStart(5, '0')}`;
+      console.warn(`[ERP FALLBACK] Using local sequence for orderNumber: ${orderNumber}`);
+    }
+
+    const invoiceNumber = `FAT-${orderNumber}`;
 
     let finalPaymentMethod: PaymentMethod = PaymentMethod.BANK_TRANSFER;
     if (paymentMethod === 'CREDIT_CARD') {
@@ -365,7 +418,7 @@ export async function createOrder(req: AuthenticatedRequest, res: Response): Pro
         city: newOrder.shippingCity || newOrder.shippingAddress?.city,
         district: newOrder.shippingDistrict || newOrder.shippingAddress?.district,
         regionCode: newOrder.regionCode || undefined,
-        deviceInfo: (newOrder.deviceInfo as any) || undefined,
+        deviceInfo: (newOrder.deviceInfo as Record<string, unknown> | null) || undefined,
         items: newOrder.items.map((i) => ({
           name: i.product?.name || 'Mobilya',
           quantity: i.quantity,
@@ -451,20 +504,42 @@ export async function getUserOrders(req: AuthenticatedRequest, res: Response): P
 
 export async function getAllOrders(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const orders = await prisma.order.findMany({
-      orderBy: { createdAt: 'desc' },
-      include: {
-        user: {
-          select: { id: true, name: true, email: true, phone: true, role: true },
+    const page = Math.max(1, parseInt(String(req.query.page), 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit), 10) || 20));
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, phone: true, role: true },
+          },
+          items: {
+            include: {
+              product: {
+                select: { id: true, name: true, image: true, price: true, erpItemId: true },
+              },
+            },
+          },
+          shippingAddress: true,
         },
-        items: {
-          include: { product: true },
-        },
-        shippingAddress: true,
+      }),
+      prisma.order.count(),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      orders,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
       },
     });
-
-    res.status(200).json({ success: true, orders });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Sipariş listesi alınamadı.';
     res.status(500).json({ success: false, message: msg });
@@ -675,8 +750,9 @@ export async function getOrderByNumber(req: AuthenticatedRequest, res: Response)
     }
 
     res.status(200).json({ success: true, order });
-  } catch (err: any) {
-    res.status(500).json({ success: false, message: err.message || 'Sipariş yüklenemedi.' });
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : 'Sipariş yüklenemedi.';
+    res.status(500).json({ success: false, message: errorMsg });
   }
 }
 

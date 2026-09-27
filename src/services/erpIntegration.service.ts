@@ -5,6 +5,7 @@ import { URL } from 'url';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
 import { invalidateCachePattern } from '../utils/cache';
+import type { Product } from '@prisma/client';
 
 export interface ErpItem {
   id: string;
@@ -30,6 +31,64 @@ export interface SyncProductInput {
   material?: string;
 }
 
+export interface CatalogItem {
+  erpId: string;
+  erpCode: string;
+  erpName: string;
+  erpSalePrice: number;
+  erpStock: number;
+  erpType: string;
+  erpImage: string | null;
+  webProduct: {
+    id: string;
+    name: string;
+    slug: string;
+    price: number;
+    stock: number;
+    isPublished: boolean;
+    images: string[];
+    image: string;
+    categoryId: string;
+    categoryName: string;
+    description: string;
+    dimensions: string;
+    material: string;
+  } | null;
+}
+
+export interface ErpOrderItemInput {
+  itemId: string;
+  quantity: number;
+  price: number;
+  name: string;
+}
+
+export interface ErpWebOrderInput {
+  orderNumber?: string;
+  warehouse?: string;
+  warehouseCode?: string;
+  customerType?: 'CORPORATE' | 'INDIVIDUAL' | string;
+  fullName?: string;
+  customerName?: string;
+  phone1?: string;
+  phone2?: string;
+  customerPhone?: string;
+  email?: string;
+  customerEmail?: string;
+  city?: string;
+  district?: string;
+  address?: string;
+  addressLine?: string;
+  taxOffice?: string;
+  taxNumber?: string;
+  orderNote?: string;
+  totalAmount: number;
+  discountAmount?: number;
+  paymentMethod?: string;
+  items: ErpOrderItemInput[];
+  isDealer?: boolean;
+}
+
 export class ErpIntegrationService {
   private getErpApiUrl(): string {
     const rawUrl = process.env.ERP_API_URL || '';
@@ -47,7 +106,7 @@ export class ErpIntegrationService {
     return process.env.ERP_INTEGRATION_KEY || 'ermay_web_erp_secure_key_2026';
   }
 
-  private async request<T>(method: string, path: string, body?: any): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const cleanBase = this.getErpApiUrl().replace(/\/$/, '');
     const cleanPath = path.replace(/^\//, '');
     const fullUrl = new URL(`${cleanBase}/${cleanPath}`);
@@ -121,7 +180,7 @@ export class ErpIntegrationService {
       const items = res.items || [];
       this.cachedErpItems = { items, timestamp: now };
       return items;
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (this.cachedErpItems) {
         return this.cachedErpItems.items; // Fallback to existing cache if ERP throttled
       }
@@ -132,7 +191,7 @@ export class ErpIntegrationService {
   /**
    * Fetch combined catalog: ERP items joined with ErmayWeb Product publish/image state
    */
-  async getCombinedCatalog(): Promise<any[]> {
+  async getCombinedCatalog(): Promise<CatalogItem[]> {
     const erpItems = await this.fetchErpItems();
 
     const webProducts = await prisma.product.findMany({
@@ -144,7 +203,7 @@ export class ErpIntegrationService {
       },
     });
 
-    const webProductMap = new Map<string, any>();
+    const webProductMap = new Map<string, typeof webProducts[number]>();
     webProducts.forEach((wp) => {
       if (wp.erpItemId) webProductMap.set(wp.erpItemId, wp);
     });
@@ -184,7 +243,7 @@ export class ErpIntegrationService {
    * Synchronize (Save or update) an ERP item in ErmayWeb and toggle publish state
    * Rule: Min 1 image, Max 5 images. If images is empty, isPublished CANNOT be true!
    */
-  async syncProduct(input: SyncProductInput): Promise<any> {
+  async syncProduct(input: SyncProductInput): Promise<Product> {
     const { erpItemId, isPublished, images, categoryId, name, description, dimensions, material } = input;
 
     // Enforce 1-5 images rule for published products
@@ -276,8 +335,9 @@ export class ErpIntegrationService {
         await this.request('PATCH', `/integration/items/${erpItemId}/image`, {
           imageUrl: mainImage,
         });
-      } catch (err: any) {
-        console.warn(`ERP image update warning: ${err.message}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`ERP image update warning: ${msg}`);
       }
     }
 
@@ -289,19 +349,22 @@ export class ErpIntegrationService {
   /**
    * Submit web order directly to ERP sales pipeline
    */
-  async submitWebOrderToErp(orderData: any): Promise<{ saleId: string; saleCode: string; grandTotal: any }> {
+  async submitWebOrderToErp(orderData: ErpWebOrderInput): Promise<{ saleId: string; saleCode: string; orderNumber: string; grandTotal: number | string; partyId: string }> {
     const res = await this.request<{
       success: boolean;
       saleId: string;
       saleCode: string;
-      grandTotal: any;
+      orderNumber?: string;
+      grandTotal: number | string;
       partyId: string;
     }>('POST', '/integration/orders', orderData);
 
     return {
       saleId: res.saleId,
       saleCode: res.saleCode,
+      orderNumber: res.orderNumber || res.saleCode,
       grandTotal: res.grandTotal,
+      partyId: res.partyId,
     };
   }
 }

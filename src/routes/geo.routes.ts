@@ -1,10 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { redis } from '../config/redis';
 import { prisma } from '../config/database';
+import { getOrSetCache, delCache } from '../utils/cache';
 
 const router = Router();
 const inMemoryGeoCache = new Map<string, { data: unknown; timestamp: number }>();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const DELIVERY_ZONES_CACHE_KEY = 'geo:delivery_zones';
+const DELIVERY_ZONES_CACHE_TTL = 1800; // 30 minutes
 
 export interface DeliveryZonesConfig {
   disabledCityIds: number[];
@@ -19,26 +22,25 @@ export interface DeliveryZonesConfig {
  */
 router.get('/delivery-zones', async (_req: Request, res: Response): Promise<void> => {
   try {
-    const block = await prisma.cmsBlock.findUnique({
-      where: { key: 'delivery_zones' },
-    });
+    const zonesData = await getOrSetCache(DELIVERY_ZONES_CACHE_KEY, DELIVERY_ZONES_CACHE_TTL, async () => {
+      const block = await prisma.cmsBlock.findUnique({
+        where: { key: 'delivery_zones' },
+      });
 
-    if (!block || !block.content) {
-      res.status(200).json({
-        success: true,
-        zones: {
+      if (!block || !block.content) {
+        return {
           disabledCityIds: [],
           disabledCityNames: [],
           noticeMessage: '',
-        },
-      });
-      return;
-    }
+        };
+      }
+      return block.content;
+    });
 
     res.status(200).json({
       success: true,
-      zones: block.content,
-      data: block.content,
+      zones: zonesData,
+      data: zonesData,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Teslimat bölgeleri verisi alınamadı.';
@@ -66,6 +68,9 @@ router.put('/delivery-zones', async (req: Request, res: Response): Promise<void>
       update: { content: payload },
       create: { key: 'delivery_zones', content: payload },
     });
+
+    // Invalidate delivery zones Redis cache
+    await delCache(DELIVERY_ZONES_CACHE_KEY).catch(() => {});
 
     res.status(200).json({
       success: true,

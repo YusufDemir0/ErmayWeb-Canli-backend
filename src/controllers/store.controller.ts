@@ -1,13 +1,19 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
+import { getOrSetCache, delCache } from '../utils/cache';
+
+const STORES_CACHE_KEY = 'stores:all';
+const STORES_CACHE_TTL = 3600; // 1 hour
 
 /**
  * Tüm Mağazaları ve Bayileri Listeleme
  */
 export async function getStores(req: Request, res: Response): Promise<void> {
   try {
-    const stores = await prisma.store.findMany({
-      orderBy: { createdAt: 'asc' },
+    const stores = await getOrSetCache(STORES_CACHE_KEY, STORES_CACHE_TTL, async () => {
+      return prisma.store.findMany({
+        orderBy: { createdAt: 'asc' },
+      });
     });
 
     res.status(200).json({
@@ -46,6 +52,8 @@ export async function createStore(req: Request, res: Response): Promise<void> {
         isActive: isActive !== undefined ? isActive : true,
       },
     });
+
+    await delCache(STORES_CACHE_KEY).catch(() => {});
 
     res.status(201).json({
       success: true,
@@ -88,6 +96,8 @@ export async function updateStore(req: Request, res: Response): Promise<void> {
       },
     });
 
+    await delCache(STORES_CACHE_KEY).catch(() => {});
+
     res.status(200).json({
       success: true,
       message: 'Mağaza bilgileri başarıyla güncellendi.',
@@ -113,6 +123,8 @@ export async function deleteStore(req: Request, res: Response): Promise<void> {
     }
 
     await prisma.store.delete({ where: { id } });
+
+    await delCache(STORES_CACHE_KEY).catch(() => {});
 
     res.status(200).json({
       success: true,

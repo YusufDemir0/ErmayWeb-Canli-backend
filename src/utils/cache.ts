@@ -1,7 +1,10 @@
 import { redis } from '../config/redis';
 
+// In-flight deduplication against cache stampedes
+const pendingFetches = new Map<string, Promise<unknown>>();
+
 /**
- * High-performance safe Redis caching utility with automatic fallback.
+ * High-performance safe Redis caching utility with automatic fallback & in-flight stampede protection.
  * If Redis is unavailable or times out, it directly executes the fetcher function.
  */
 export async function getOrSetCache<T>(
@@ -20,36 +23,58 @@ export async function getOrSetCache<T>(
     // Silently proceed to database query on cache miss or Redis read error
   }
 
-  const freshData = await fetcher();
-
-  try {
-    if (redis.status === 'ready' && freshData !== undefined && freshData !== null) {
-      await redis.setex(key, ttlSeconds, JSON.stringify(freshData));
-    }
-  } catch (err) {
-    // Non-critical if write fails
+  // Deduplicate concurrent in-flight executions for the same cache key
+  const existingPromise = pendingFetches.get(key);
+  if (existingPromise) {
+    return existingPromise as Promise<T>;
   }
 
-  return freshData;
+  const fetchPromise = (async () => {
+    try {
+      const freshData = await fetcher();
+
+      if (redis.status === 'ready' && freshData !== undefined && freshData !== null) {
+        await redis.setex(key, ttlSeconds, JSON.stringify(freshData)).catch(() => {});
+      }
+
+      return freshData;
+    } finally {
+      pendingFetches.delete(key);
+    }
+  })();
+
+  pendingFetches.set(key, fetchPromise);
+  return fetchPromise;
 }
 
 /**
- * Invalidate all Redis keys matching a pattern (e.g. "products:*", "categories:*").
+ * Invalidate all Redis keys matching a pattern (e.g. "products:*", "categories:*") safely awaiting stream completion.
  */
 export async function invalidateCachePattern(pattern: string): Promise<void> {
   try {
     if (redis.status !== 'ready') return;
     const stream = redis.scanStream({
       match: pattern,
-      count: 100,
+      count: 200,
     });
 
-    stream.on('data', async (keys: string[]) => {
-      if (keys.length > 0) {
-        const pipeline = redis.pipeline();
-        keys.forEach((k) => pipeline.del(k));
-        await pipeline.exec();
-      }
+    await new Promise<void>((resolve, reject) => {
+      stream.on('data', async (keys: string[]) => {
+        if (keys.length > 0) {
+          try {
+            const pipeline = redis.pipeline();
+            keys.forEach((k) => pipeline.del(k));
+            await pipeline.exec();
+          } catch (delErr) {
+            console.warn('Pipeline delete warning:', delErr);
+          }
+        }
+      });
+      stream.on('end', () => resolve());
+      stream.on('error', (err) => {
+        console.warn(`Scan stream error for pattern ${pattern}:`, err);
+        resolve(); // resolve gracefully so caller is never blocked
+      });
     });
   } catch (err) {
     console.warn(`Cache invalidation failed for pattern ${pattern}:`, err);

@@ -12,11 +12,12 @@ export async function getErpCatalog(_req: Request, res: Response): Promise<void>
       count: catalog.length,
       catalog,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'ERP ürün kataloğu alınamadı.';
     console.error('ERP Catalog Error:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'ERP ürün kataloğu alınamadı.',
+      message: errorMsg,
     });
   }
 }
@@ -48,11 +49,12 @@ export async function syncProduct(req: Request, res: Response): Promise<void> {
         : 'Ürün web satışına kapatıldı / güncellendi.',
       product: savedProduct,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'Ürün senkronizasyonu başarısız oldu.';
     console.error('ERP Sync Error:', error);
     res.status(400).json({
       success: false,
-      message: error.message || 'Ürün senkronizasyonu başarısız oldu.',
+      message: errorMsg,
     });
   }
 }
@@ -131,7 +133,7 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
               variant: it.variant?.color || undefined,
             })),
           });
-        } catch (emailErr: any) {
+        } catch (emailErr: unknown) {
           console.error('Order approval email sending failed:', emailErr);
         }
       }
@@ -142,8 +144,9 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
       message: 'ERP Satış onayı başarıyla işlendi ve müşteriye bilgilendirme maili iletildi.',
       orderFound: Boolean(order),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'Webhook işlenemedi.';
     console.error('ERP Webhook Error:', error);
-    res.status(500).json({ success: false, message: error.message || 'Webhook işlenemedi.' });
+    res.status(500).json({ success: false, message: errorMsg });
   }
 }

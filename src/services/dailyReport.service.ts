@@ -1,13 +1,21 @@
 import { prisma } from '../config/database';
 import { emailService } from './email.service';
 
+export interface DailyReportSummary {
+  dateStr: string;
+  totalRevenue: number;
+  orderCount: number;
+  deviceBreakdown: Record<string, number>;
+  topProducts: Array<{ name: string; count: number; revenue: number }>;
+}
+
 export class DailyReportService {
   /**
    * Aggregate yesterday's sales data from PostgreSQL and send email to admin
    */
   async generateAndSendDailyReport(targetDate?: Date): Promise<{
     success: boolean;
-    data: any;
+    data: DailyReportSummary | null;
     message: string;
   }> {
     const baseDate = targetDate || new Date();
@@ -81,7 +89,7 @@ export class DailyReportService {
         statusBreakdown[st] = (statusBreakdown[st] || 0) + 1;
 
         // Device
-        const devInfo = (o as any).deviceInfo as { deviceType?: string } | null;
+        const devInfo = (o.deviceInfo && typeof o.deviceInfo === 'object') ? (o.deviceInfo as { deviceType?: string }) : null;
         const devType = devInfo?.deviceType || 'Bilinmiyor';
         if (devType.toLowerCase().includes('mobil') || devType.toLowerCase().includes('telefon')) {
           deviceBreakdown['Mobil'] = (deviceBreakdown['Mobil'] || 0) + 1;
@@ -160,9 +168,10 @@ export class DailyReportService {
         },
         message: `${dateStr} tarihli satış raporu oluşturuldu ve admin mailine iletildi.`,
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Rapor oluşturulamadı.';
       console.error('[DAILY REPORT ERROR]:', err);
-      return { success: false, data: null, message: err.message || 'Rapor oluşturulamadı.' };
+      return { success: false, data: null, message: msg };
     }
   }
 }

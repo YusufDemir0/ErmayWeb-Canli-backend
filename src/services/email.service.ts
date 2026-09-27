@@ -197,8 +197,9 @@ export class EmailService {
     try {
       // In production with real credentials, send via nodemailer or SMTP
       return { success: true, message: 'Sipariş e-postası müşteriye iletildi.' };
-    } catch (err: any) {
-      console.error('[EMAIL ERROR]:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[EMAIL ERROR]:', msg);
       return { success: false, message: 'E-posta gönderilemedi.' };
     }
   }
@@ -351,8 +352,9 @@ export class EmailService {
 
     try {
       return { success: true, message: 'Sipariş onay e-postası müşteriye iletildi.' };
-    } catch (err: any) {
-      console.error('[EMAIL ERROR]:', err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[EMAIL ERROR]:', msg);
       return { success: false, message: 'Onay e-postası gönderilemedi.' };
     }
   }

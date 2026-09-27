@@ -138,6 +138,7 @@ model Product {
   @@index([isPublished, price])
   @@index([isPublished, salesCount(sort: Desc)])
   @@index([inStock, isPublished])
+  @@index([isPublished, erpItemId])
   @@map("products")
 }
 
