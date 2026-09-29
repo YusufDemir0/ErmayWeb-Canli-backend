@@ -124,6 +124,8 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
             heightCm: true,
             depthCm: true,
             leadTimeDays: true,
+            drawerCount: true,
+            vatRate: true,
             setPieces: true,
             erpItemId: true,
             erpItemCode: true,
@@ -139,6 +141,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
         ...p,
         price: Number(p.price),
         originalPrice: p.originalPrice ? Number(p.originalPrice) : null,
+        vatRate: p.vatRate ? Number(p.vatRate) : 0.20,
       }));
 
       return {
@@ -226,6 +229,9 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       widthCm,
       heightCm,
       depthCm,
+      drawerCount,
+      leadTimeDays,
+      vatRate,
       badge,
       isPublished,
     } = req.body;
@@ -314,6 +320,9 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
         widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
         heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
         depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+        drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
+        leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
+        vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
         isPublished: targetPublish,
         erpItemCode: erpItemCode || null,
         archivedAt: null,
@@ -337,6 +346,9 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
         widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
         heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
         depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+        drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
+        leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
+        vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
         erpItemId: String(erpItemId),
         erpItemCode: erpItemCode || null,
         isPublished: targetPublish,
@@ -422,6 +434,10 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
         ...(body.widthCm !== undefined && { widthCm: body.widthCm ? parseInt(String(body.widthCm), 10) : null }),
         ...(body.heightCm !== undefined && { heightCm: body.heightCm ? parseInt(String(body.heightCm), 10) : null }),
         ...(body.depthCm !== undefined && { depthCm: body.depthCm ? parseInt(String(body.depthCm), 10) : null }),
+        ...(body.drawerCount !== undefined && { drawerCount: parseInt(String(body.drawerCount), 10) }),
+        ...(body.leadTimeDays !== undefined && { leadTimeDays: parseInt(String(body.leadTimeDays), 10) }),
+        ...(body.vatRate !== undefined && { vatRate: parseFloat(String(body.vatRate)) }),
+        ...(body.erpItemCode !== undefined && { erpItemCode: body.erpItemCode }),
         isPublished,
       },
     });
