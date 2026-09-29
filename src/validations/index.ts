@@ -37,6 +37,7 @@ export const CreateProductSchema = z.object({
   depthCm: z.coerce.number().optional().nullable(),
   heightCm: z.coerce.number().optional().nullable(),
   drawerCount: z.coerce.number().optional().nullable(),
+  leadTimeDays: z.coerce.number().optional().nullable(),
   unitCount: z.coerce.number().optional().nullable(),
   colors: z.array(z.union([z.string(), z.record(z.unknown())])).optional(),
   setPieces: z.array(z.unknown()).optional(),
