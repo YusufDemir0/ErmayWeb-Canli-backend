@@ -1,8 +1,9 @@
 import { z } from 'zod';
 
 export const LoginSchema = z.object({
-  email: z.string().email('Geçerli bir e-posta adresi giriniz.'),
-  password: z.string().min(6, 'Şifreniz en az 6 karakter olmalıdır.'),
+  email: z.string().optional(),
+  username: z.string().optional(),
+  password: z.string().min(1, 'Şifre zorunludur.'),
 });
 
 export const RegisterSchema = z.object({
@@ -70,80 +71,9 @@ export const UpdateCmsBlockSchema = z.object({
   description: z.string().optional(),
 });
 
-export const ProcessPaymentSchema = z.object({
-  conversationId: z.string().optional(),
-  orderId: z.string().min(1, 'Sipariş ID (orderId) zorunludur.'),
-  totalAmount: z.number().optional(),
-  installment: z.number().int().min(1).max(12).optional(),
-  cardHolderName: z.string().min(2, 'Kart üzerindeki isim en az 2 karakter olmalıdır.'),
-  cardNumber: z.string().min(12, 'Kart numarası eksik veya geçersiz.'),
-  expireMonth: z.union([z.string(), z.number()]),
-  expireYear: z.union([z.string(), z.number()]),
-  cvv: z.string().min(3).max(4, 'CVV 3 veya 4 haneli olmalıdır.'),
-  savedCardId: z.string().optional(),
-  cardToken: z.string().optional(),
-  buyer: z.object({
-    id: z.string().optional(),
-    name: z.string().optional(),
-    surname: z.string().optional(),
-    gsmNumber: z.string().optional(),
-    email: z.string().email().optional(),
-    identityNumber: z.string().optional(),
-    registrationAddress: z.string().optional(),
-    city: z.string().optional(),
-    country: z.string().optional(),
-    ip: z.string().optional(),
-  }).optional(),
-});
+export * from './request.validation';
 
-export const CreateOrderSchema = z.object({
-  items: z.array(
-    z.object({
-      productId: z.string().optional(),
-      product: z.object({ id: z.string() }).optional(),
-      variantId: z.string().nullable().optional(),
-      quantity: z.number().int().positive('Miktar en az 1 olmalıdır.'),
-      price: z.number().positive().optional(),
-    })
-  ).min(1, 'Sipariş en az 1 ürün içermelidir.'),
-  shippingAddress: z.object({
-    fullName: z.string().min(2),
-    phone: z.string(),
-    city: z.string(),
-    district: z.string(),
-    addressLine: z.string(),
-    zipCode: z.string().optional(),
-    title: z.string().optional(),
-  }).optional(),
-  shippingAddressId: z.string().optional(),
-  customerName: z.string().optional(),
-  customerEmail: z.string().email().optional(),
-  customerPhone: z.string().optional(),
-  customerPhone2: z.string().optional(),
-  shippingCity: z.string().optional(),
-  shippingDistrict: z.string().optional(),
-  shippingAddressLine: z.string().optional(),
-  orderNote: z.string().optional(),
-  invoiceType: z.enum(['INDIVIDUAL', 'CORPORATE']).optional(),
-  tcKn: z.string().optional(),
-  companyTitle: z.string().optional(),
-  taxNo: z.string().optional(),
-  taxOffice: z.string().optional(),
-  paymentMethod: z.enum(['CREDIT_CARD', 'BANK_TRANSFER', 'CASH_ON_DELIVERY', 'WHATSAPP_ORDER']).optional(),
-  couponCode: z.string().optional(),
-  totalAmount: z.number().positive().optional(),
-  discountAmount: z.number().optional(),
-  receiptUrl: z.string().optional(),
-  deviceInfo: z.record(z.unknown()).optional(),
-  regionCode: z.string().optional(),
-  kvkkAccepted: z.boolean().optional(),
-});
+// Backward compatibility alias
+export { CreateOrderRequestSchema as CreateOrderSchema } from './request.validation';
+export { UpdateOrderRequestStatusSchema as UpdateOrderStatusSchema } from './request.validation';
 
-export const UpdateOrderStatusSchema = z.object({
-  orderStatus: z.enum([
-    'PENDING', 'PENDING_PAYMENT', 'PAYMENT_CONFIRMED', 'CONFIRMED', 'PREPARING', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'REFUNDED',
-    'Ödeme Bekliyor', 'Ödeme Onaylandı', 'Hazırlanıyor', 'Kargoya Verildi', 'Teslim Edildi', 'İptal Edildi', 'İade Edildi'
-  ], { required_error: 'Sipariş durumu zorunludur.' }),
-  trackingNumber: z.string().optional(),
-  shippingCarrier: z.string().optional(),
-});

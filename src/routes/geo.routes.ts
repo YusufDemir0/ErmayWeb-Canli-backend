@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { redis } from '../config/redis';
 import { prisma } from '../config/database';
 import { getOrSetCache, delCache } from '../utils/cache';
+import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
 
 const router = Router();
 const inMemoryGeoCache = new Map<string, { data: unknown; timestamp: number }>();
@@ -51,8 +51,9 @@ router.get('/delivery-zones', async (_req: Request, res: Response): Promise<void
 /**
  * PUT /api/v1/geo/delivery-zones
  * Update which cities are enabled/disabled for shipping & assembly.
+ * Protected: Requires ADMIN role.
  */
-router.put('/delivery-zones', async (req: Request, res: Response): Promise<void> => {
+router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), async (req: Request, res: Response): Promise<void> => {
   try {
     const { disabledCityIds = [], disabledCityNames = [], noticeMessage = '' } = req.body;
 
@@ -96,30 +97,19 @@ router.get('/reverse', async (req: Request, res: Response): Promise<void> => {
     const roundedLng = Number(lng).toFixed(3);
     const cacheKey = `geo:reverse:${roundedLat}:${roundedLng}`;
 
-    // 1. Try Redis Cache
-    try {
-      const redisCached = await redis.get(cacheKey);
-      if (redisCached) {
-        res.status(200).json({ success: true, data: JSON.parse(redisCached), cached: true });
-        return;
-      }
-    } catch {
-      // Redis unavailable fallback
-    }
-
-    // 2. Try In-Memory Cache fallback
+    // 1. Try In-Memory Cache
     const memCached = inMemoryGeoCache.get(cacheKey);
     if (memCached && Date.now() - memCached.timestamp < CACHE_TTL_MS) {
       res.status(200).json({ success: true, data: memCached.data, cached: true });
       return;
     }
 
-    // 3. Fetch from Nominatim API with custom User-Agent
+    // 2. Fetch from Nominatim API with custom User-Agent
     const response = await fetch(
       `https://nominatim.openstreetmap.org/reverse?format=json&lat=${roundedLat}&lon=${roundedLng}`,
       {
         headers: {
-          'User-Agent': 'ErmayWeb-Furniture-ECommerce/2.0 (contact@ermaymobilya.com)',
+          'User-Agent': 'ErmayWeb-Furniture-ECommerce/3.0 (contact@ermaymobilya.com)',
           'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
         },
       }
@@ -132,17 +122,12 @@ router.get('/reverse', async (req: Request, res: Response): Promise<void> => {
 
     const data = await response.json();
 
-    // Cache the reverse geocoding result
-    try {
-      await redis.setex(cacheKey, 86400, JSON.stringify(data));
-    } catch {
-      // LRU Eviction: ensure memory cache does not exceed 500 entries
-      if (inMemoryGeoCache.size >= 500) {
-        const firstKey = inMemoryGeoCache.keys().next().value;
-        if (firstKey) inMemoryGeoCache.delete(firstKey);
-      }
-      inMemoryGeoCache.set(cacheKey, { data, timestamp: Date.now() });
+    // LRU Eviction: ensure memory cache does not exceed 500 entries
+    if (inMemoryGeoCache.size >= 500) {
+      const firstKey = inMemoryGeoCache.keys().next().value;
+      if (firstKey) inMemoryGeoCache.delete(firstKey);
     }
+    inMemoryGeoCache.set(cacheKey, { data, timestamp: Date.now() });
 
     res.status(200).json({ success: true, data, cached: false });
   } catch (error: unknown) {

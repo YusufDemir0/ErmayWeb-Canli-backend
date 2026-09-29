@@ -7,16 +7,18 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import crypto from 'crypto';
 import routes from './routes';
-import { redis } from './config/redis';
 import { prisma } from './config/database';
 import { imageOptimizerMiddleware } from './middlewares/imageOptimizer.middleware';
 
 export const app = express();
 
-// 1. Disable Fingerprinting & Info Disclosure
+// 1. Trust Proxy Configuration (Reverse Proxy + Next.js hop count)
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 2));
+
+// 2. Disable Fingerprinting & Info Disclosure
 app.disable('x-powered-by');
 
-// 2. High-Performance Gzip / Deflate Compression
+// 3. High-Performance Gzip / Deflate Compression
 app.use(compression({
   threshold: 1024, // Compress responses larger than 1KB
   filter: (req, res) => {
@@ -27,13 +29,13 @@ app.use(compression({
   },
 }));
 
-// 3. Enterprise Security Headers (Helmet)
+// 4. Enterprise Security Headers (Helmet)
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
   contentSecurityPolicy: false, // Managed via frontend reverse proxy
 }));
 
-// 4. Enterprise CORS Configuration with Strict Whitelist Enforcement
+// 5. Enterprise CORS Configuration with Strict Whitelist Enforcement
 const rawOrigins = (process.env.CORS_ORIGIN || process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim().toLowerCase())
@@ -67,15 +69,15 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Explicitly reject unauthorized foreign origins
-    return callback(new Error(`CORS İhlali: Yetkisiz etki alanı (${origin}) üzerinden API erişimi engellendi.`));
+    // Explicitly reject unauthorized foreign origins without throwing 500 error
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'Accept', 'Idempotency-Key', 'x-integration-key'],
 }));
 
-// 5. URL Normalization & Malicious Path Traversal Protection
+// 6. URL Normalization & Malicious Path Traversal Protection
 app.use((req, res, next) => {
   try {
     decodeURIComponent(req.path);
@@ -91,7 +93,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// 6. Traceability: Request ID Middleware
+// 7. Traceability: Request ID Middleware
 app.use((req, res, next) => {
   const requestId = (req.headers['x-request-id'] as string) || `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   req.headers['x-request-id'] = requestId;
@@ -99,15 +101,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// 7. Structured HTTP Request Logging with Request ID
+// 8. Structured HTTP Request Logging with Request ID and Client IP
 morgan.token('req-id', (req: express.Request) => (req.headers['x-request-id'] as string) || '-');
-app.use(morgan('[:date[iso]] [:req-id] :method :url :status :response-time ms - :res[content-length]'));
+morgan.token('real-ip', (req: express.Request) => req.ip || req.socket.remoteAddress || '-');
+app.use(morgan('[:date[iso]] [:req-id] [:real-ip] :method :url :status :response-time ms - :res[content-length]'));
 
-// 8. Enterprise Resilient Rate Limiter (Memory Default with Optional Redis Store)
+// 9. Resilient Rate Limiter (No bypass header, trusted client IP)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50000, // Increased for admin bulk uploads and integration sync
-  skip: (req) => req.ip === '127.0.0.1' || req.ip === '::1' || req.ip === '::ffff:127.0.0.1' || Boolean(req.headers['x-skip-ratelimit']),
+  max: 300, // 300 requests per 15 minutes per IP
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Çok fazla istek gönderdiniz. Lütfen 15 dakika sonra tekrar deneyiniz.' },
@@ -115,11 +117,15 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
-// 9. Parsers
+// 10. Parsers
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
-// 10. High-Performance Static Media with On-The-Fly WebP Sharp Optimization
+// 11. High-Performance Static Media (Block Private Uploads from static root)
+app.use('/uploads/private', (_req, res) => {
+  res.status(403).json({ success: false, message: 'Yetkisiz erişim: Özel dizin doğrudan sunulamaz.' });
+});
+
 app.use('/uploads', imageOptimizerMiddleware);
 app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   maxAge: '30d',
@@ -130,12 +136,11 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
   },
 }));
 
-// 11. Deep Enterprise Health & Readiness Checks
+// 12. Deep Enterprise Health & Readiness Checks
 app.get('/health', async (req, res) => {
   const startTime = Date.now();
   let dbStatus = 'UNKNOWN';
   let dbLatencyMs = 0;
-  let redisStatus = 'UNKNOWN';
 
   // Test Database
   try {
@@ -147,24 +152,12 @@ app.get('/health', async (req, res) => {
     dbStatus = 'DEGRADED';
   }
 
-  // Test Redis Cache
-  try {
-    if (redis.status === 'ready') {
-      const redisPing = await redis.ping();
-      redisStatus = redisPing === 'PONG' ? 'HEALTHY' : 'DEGRADED';
-    } else {
-      redisStatus = 'OFFLINE_FALLBACK_ACTIVE';
-    }
-  } catch (err) {
-    redisStatus = 'OFFLINE_FALLBACK_ACTIVE';
-  }
-
   const memoryUsage = process.memoryUsage();
 
   res.status(dbStatus === 'HEALTHY' ? 200 : 503).json({
     status: dbStatus === 'HEALTHY' ? 'OK' : 'DEGRADED',
-    service: 'ErmayWeb Enterprise Backend REST API',
-    version: '2.0.0',
+    service: 'ErmayWeb REST API',
+    version: '3.0.0',
     timestamp: new Date().toISOString(),
     uptimeSeconds: Math.round(process.uptime()),
     components: {
@@ -174,8 +167,8 @@ app.get('/health', async (req, res) => {
         latencyMs: dbLatencyMs,
       },
       cache: {
-        provider: 'Redis',
-        status: redisStatus,
+        provider: 'In-Memory LRU',
+        status: 'HEALTHY',
       },
       memory: {
         rssMb: Math.round(memoryUsage.rss / 1024 / 1024),

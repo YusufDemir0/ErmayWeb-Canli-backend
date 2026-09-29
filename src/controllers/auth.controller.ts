@@ -3,115 +3,64 @@ import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../config/database';
 import { hashPassword, comparePassword } from '../utils/password';
 import { generateToken } from '../utils/jwt';
-import { Role } from '@prisma/client';
+import { AdminRole } from '@prisma/client';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
-export async function register(req: Request, res: Response): Promise<void> {
-  try {
-    const { name, email, phone, password } = req.body;
-
-    if (!name || !email || !password || !phone) {
-      res.status(400).json({ success: false, message: 'Lütfen tüm zorunlu alanları doldurunuz.' });
-      return;
-    }
-
-    const existingUser = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
-    });
-
-    if (existingUser) {
-      res.status(409).json({ success: false, message: 'Bu e-posta adresi ile kayıtlı bir hesap zaten mevcuttur.' });
-      return;
-    }
-
-    const hashedPassword = await hashPassword(password);
-
-    const user = await prisma.user.create({
-      data: {
-        name,
-        email: email.toLowerCase(),
-        phone,
-        password: hashedPassword,
-        role: Role.CUSTOMER,
-      },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        createdAt: true,
-        addresses: true,
-      },
-    });
-
-    const token = generateToken({
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-    });
-
-    // Set secure cross-origin compatible Cookie
-    res.cookie('auth_token', token, {
-      httpOnly: true,
-      secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Hesabınız başarıyla oluşturuldu.',
-      token,
-      user,
-    });
-  } catch (error) {
-    console.error('Kayıt Hatası:', error);
-    res.status(500).json({ success: false, message: 'Sunucu tarafında bir hata oluştu.' });
-  }
-}
-
+/**
+ * POST /api/v1/auth/login or /api/v1/admin/auth/login
+ * Admin & Staff Login. Sets secure httpOnly cookie 'ermay_admin'.
+ */
 export async function login(req: Request, res: Response): Promise<void> {
   try {
-    const { email, password } = req.body;
+    const rawIdentifier = String(req.body.email || req.body.username || '').toLowerCase().trim();
+    const password = String(req.body.password || '').trim();
 
-    if (!email || !password) {
-      res.status(400).json({ success: false, message: 'E-posta ve şifre zorunludur.' });
+    if (!rawIdentifier || !password) {
+      res.status(400).json({ success: false, message: 'Lütfen kullanıcı adı / e-posta ve şifrenizi giriniz.' });
       return;
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
-      include: {
-        addresses: true,
+    const adminUser = await prisma.adminUser.findFirst({
+      where: {
+        OR: [
+          { email: rawIdentifier },
+          { email: `${rawIdentifier}@ermaymobilya.com` },
+          { name: { equals: rawIdentifier, mode: 'insensitive' } },
+        ],
       },
     });
 
-    if (!user) {
-      res.status(401).json({ success: false, message: 'E-posta veya şifre hatalı.' });
+    if (!adminUser || !adminUser.isActive) {
+      res.status(401).json({ success: false, message: 'Geçersiz e-posta veya şifre.' });
       return;
     }
 
-    const isMatch = await comparePassword(password, user.password);
+    const isMatch = await comparePassword(password, adminUser.passwordHash);
     if (!isMatch) {
-      res.status(401).json({ success: false, message: 'E-posta veya şifre hatalı.' });
+      res.status(401).json({ success: false, message: 'Geçersiz e-posta veya şifre.' });
       return;
     }
 
-    const token = generateToken({
-      userId: user.id,
-      email: user.email,
-      role: user.role,
+    // Update lastLoginAt
+    await prisma.adminUser.update({
+      where: { id: adminUser.id },
+      data: { lastLoginAt: new Date() },
     });
 
-    // Set secure cross-origin compatible Cookie
-    const cookieName = user.role === 'ADMIN' ? 'admin_jwt_token' : 'auth_token';
-    res.cookie(cookieName, token, {
+    const token = generateToken({
+      userId: adminUser.id,
+      email: adminUser.email,
+      role: adminUser.role,
+    });
+
+    // Set secure cross-origin compatible HttpOnly Cookie
+    res.cookie('ermay_admin', token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? 'none' : 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      sameSite: 'lax',
+      maxAge: 12 * 60 * 60 * 1000, // 12 hours
+      path: '/',
     });
 
     res.status(200).json({
@@ -119,364 +68,156 @@ export async function login(req: Request, res: Response): Promise<void> {
       message: 'Giriş başarılı.',
       token,
       user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        addresses: user.addresses || [],
+        id: adminUser.id,
+        name: adminUser.name,
+        email: adminUser.email,
+        role: adminUser.role,
       },
     });
-  } catch (error) {
-    console.error('Giriş Hatası:', error);
-    res.status(500).json({ success: false, message: 'Sunucu tarafında bir hata oluştu.' });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Giriş yapılırken bir hata oluştu.';
+    console.error('Login error:', error);
+    res.status(500).json({ success: false, message: msg });
   }
 }
 
-export async function logout(req: Request, res: Response): Promise<void> {
-  res.clearCookie('auth_token', { sameSite: isProduction ? 'none' : 'lax', secure: isProduction });
-  res.clearCookie('admin_jwt_token', { sameSite: isProduction ? 'none' : 'lax', secure: isProduction });
-  res.status(200).json({ success: true, message: 'Çıkış yapıldı.' });
+/**
+ * POST /api/v1/auth/logout
+ * Clears the auth cookie.
+ */
+export async function logout(_req: Request, res: Response): Promise<void> {
+  res.clearCookie('ermay_admin', {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/',
+  });
+  res.clearCookie('auth_token', { path: '/' });
+  res.status(200).json({ success: true, message: 'Başarıyla çıkış yapıldı.' });
 }
 
+/**
+ * GET /api/v1/auth/profile or /api/v1/admin/auth/me
+ * Retrieves current admin/staff profile.
+ */
 export async function getProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Oturum açılmamış.' });
       return;
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
+    const adminUser = await prisma.adminUser.findUnique({
+      where: { id: req.user.userId },
       select: {
         id: true,
         name: true,
         email: true,
-        phone: true,
         role: true,
+        isActive: true,
+        lastLoginAt: true,
         createdAt: true,
-        addresses: true,
-        cards: true,
       },
     });
 
-    if (!user) {
-      res.status(404).json({ success: false, message: 'Kullanıcı bulunamadı.' });
+    if (!adminUser || !adminUser.isActive) {
+      res.status(404).json({ success: false, message: 'Kullanıcı hesabı bulunamadı veya pasif.' });
       return;
     }
-
-    res.status(200).json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Profil bilgileri alınamadı.' });
-  }
-}
-
-export async function changePassword(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    const { currentPassword, newPassword } = req.body;
-
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    if (!currentPassword) {
-      res.status(400).json({ success: false, message: 'Mevcut şifrenizi girmelisiniz.' });
-      return;
-    }
-
-    if (!newPassword || newPassword.length < 6) {
-      res.status(400).json({ success: false, message: 'Yeni şifreniz en az 6 karakter olmalıdır.' });
-      return;
-    }
-
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-    });
-
-    if (!user) {
-      res.status(404).json({ success: false, message: 'Kullanıcı bulunamadı.' });
-      return;
-    }
-
-    const isMatch = await comparePassword(currentPassword, user.password);
-    if (!isMatch) {
-      res.status(400).json({ success: false, message: 'Mevcut şifreniz hatalıdır.' });
-      return;
-    }
-
-    const hashedPassword = await hashPassword(newPassword);
-    await prisma.user.update({
-      where: { id: userId },
-      data: { password: hashedPassword },
-    });
-
-    res.status(200).json({ success: true, message: 'Şifreniz başarıyla güncellendi.' });
-  } catch (error) {
-    console.error('Şifre Değiştirme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Şifre güncellenirken bir hata oluştu.' });
-  }
-}
-
-/**
- * Kullanıcı Adreslerini Listeleme
- */
-export async function getAddresses(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const addresses = await prisma.userAddress.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    res.status(200).json({ success: true, addresses });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Adresler getirilemedi.' });
-  }
-}
-
-/**
- * Yeni Kullanıcı Adresi Ekleme (PostgreSQL Prisma Kaydı)
- */
-export async function addAddress(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const { title, fullName, phone, city, district, addressLine, zipCode } = req.body;
-
-    if (!title || !fullName || !phone || !city || !district || !addressLine) {
-      res.status(400).json({ success: false, message: 'Lütfen tüm zorunlu adres alanlarını doldurunuz.' });
-      return;
-    }
-
-    const address = await prisma.userAddress.create({
-      data: {
-        userId,
-        title,
-        fullName,
-        phone,
-        city,
-        district,
-        addressLine,
-        zipCode: zipCode || '34000',
-      },
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Adres başarıyla kaydedildi.',
-      address,
-    });
-  } catch (error) {
-    console.error('Adres Ekleme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Adres kaydedilemedi.' });
-  }
-}
-
-/**
- * Kullanıcı Adresi Güncelleme
- */
-export async function updateAddress(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    const id = req.params.id as string;
-    if (!userId || !id) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const existing = await prisma.userAddress.findFirst({
-      where: { id, userId },
-    });
-
-    if (!existing) {
-      res.status(404).json({ success: false, message: 'Güncellenecek adres bulunamadı.' });
-      return;
-    }
-
-    const { title, fullName, phone, city, district, addressLine, zipCode } = req.body;
-
-    const updated = await prisma.userAddress.update({
-      where: { id },
-      data: {
-        title: title || existing.title,
-        fullName: fullName || existing.fullName,
-        phone: phone || existing.phone,
-        city: city || existing.city,
-        district: district || existing.district,
-        addressLine: addressLine || existing.addressLine,
-        zipCode: zipCode || existing.zipCode,
-      },
-    });
 
     res.status(200).json({
       success: true,
-      message: 'Adres başarıyla güncellendi.',
-      address: updated,
+      user: adminUser,
     });
-  } catch (error) {
-    console.error('Adres Güncelleme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Adres güncellenemedi.' });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Profil yüklenemedi.';
+    res.status(500).json({ success: false, message: msg });
   }
 }
 
 /**
- * Kullanıcı Adresi Silme
+ * POST /api/v1/auth/change-password
+ * Allows logged-in user to change their password.
  */
-export async function deleteAddress(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function changePassword(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const userId = req.user?.userId;
-    const id = req.params.id as string;
-    if (!userId || !id) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Oturum açılmamış.' });
       return;
     }
 
-    const existing = await prisma.userAddress.findFirst({
-      where: { id, userId },
-    });
+    const { currentPassword, newPassword } = req.body;
 
-    if (!existing) {
-      res.status(404).json({ success: false, message: 'Silinecek adres bulunamadı.' });
-      return;
-    }
-
-    // Geçmiş siparişlerde kullanılmış mı kontrol et
-    const hasOrders = await prisma.order.findFirst({
-      where: { shippingAddressId: id },
-    });
-
-    if (hasOrders) {
+    if (!currentPassword || !newPassword || newPassword.length < 8) {
       res.status(400).json({
         success: false,
-        message: 'Geçmiş siparişlerinizde kullanılan adresler yasal fatura kaydı nedeniyle silinemez. Dilerseniz yeni bir adres ekleyebilirsiniz.',
+        message: 'Yeni şifre en az 8 karakter olmalıdır.',
       });
       return;
     }
 
-    await prisma.userAddress.delete({
-      where: { id },
+    const adminUser = await prisma.adminUser.findUnique({
+      where: { id: req.user.userId },
     });
 
-    res.status(200).json({ success: true, message: 'Adres başarıyla silindi.' });
-  } catch (error) {
-    console.error('Adres Silme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Adres silinemedi.' });
+    if (!adminUser) {
+      res.status(404).json({ success: false, message: 'Kullanıcı bulunamadı.' });
+      return;
+    }
+
+    const isMatch = await comparePassword(currentPassword, adminUser.passwordHash);
+    if (!isMatch) {
+      res.status(400).json({ success: false, message: 'Mevcut şifreniz hatalı.' });
+      return;
+    }
+
+    const hashedNew = await hashPassword(newPassword);
+    await prisma.adminUser.update({
+      where: { id: adminUser.id },
+      data: { passwordHash: hashedNew },
+    });
+
+    res.status(200).json({ success: true, message: 'Şifreniz başarıyla güncellendi.' });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Şifre güncellenemedi.';
+    res.status(500).json({ success: false, message: msg });
   }
 }
 
-/**
- * Kullanıcı Kayıtlı Kartlarını Listeleme
- */
-export async function getCards(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const cards = await prisma.userCard.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    res.status(200).json({ success: true, cards });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Kayıtlı kartlar getirilemedi.' });
-  }
+// -------------------------------------------------------------------------------------
+// FAZ 1: Kapatılan Müşteri Uçları (Geriye Dönük Uyumluluk için 404/410 Dönüşleri)
+// -------------------------------------------------------------------------------------
+export async function register(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({
+    success: false,
+    message: 'Müşteri kayıt sistemi KVKK veri minimizasyonu gereği kapatılmıştır. Siparişler talep formuyla alınmaktadır.',
+  });
 }
 
-/**
- * Yeni Kart Kaydetme (Maskelenmiş Güvenli Token Kaydı)
- */
-export async function addCard(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    if (!userId) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const { cardTitle, cardHolder, cardNumber, cardNumberMasked, expiry, cardType } = req.body;
-
-    if (!cardHolder || !expiry) {
-      res.status(400).json({ success: false, message: 'Kart bilgileri eksik veya geçersiz.' });
-      return;
-    }
-
-    // Mask card number if raw card number was provided
-    let masked = cardNumberMasked;
-    if (!masked && cardNumber) {
-      const cleanNum = cardNumber.replace(/\s+/g, '');
-      const first4 = cleanNum.slice(0, 4);
-      const last4 = cleanNum.slice(-4);
-      masked = `${first4} •••• •••• ${last4}`;
-    }
-
-    const card = await prisma.userCard.create({
-      data: {
-        userId,
-        cardTitle: cardTitle || 'Kayıtlı Kartım',
-        cardHolder: cardHolder.toUpperCase(),
-        cardNumberMasked: masked || '•••• •••• •••• ••••',
-        expiry,
-        cardType: cardType || 'generic',
-      },
-    });
-
-    res.status(201).json({
-      success: true,
-      message: 'Kartınız güvenle profilinize kaydedildi.',
-      card,
-    });
-  } catch (error) {
-    console.error('Kart Kaydetme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Kart kaydedilemedi.' });
-  }
+export async function getAddresses(_req: Request, res: Response): Promise<void> {
+  res.status(200).json({ success: true, addresses: [] });
 }
 
-/**
- * Kayıtlı Kart Silme
- */
-export async function deleteCard(req: AuthenticatedRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    const id = req.params.id as string;
-    if (!userId || !id) {
-      res.status(401).json({ success: false, message: 'Yetkisiz erişim.' });
-      return;
-    }
-
-    const existing = await prisma.userCard.findFirst({
-      where: { id, userId },
-    });
-
-    if (!existing) {
-      res.status(404).json({ success: false, message: 'Silinecek kart bulunamadı.' });
-      return;
-    }
-
-    await prisma.userCard.delete({
-      where: { id },
-    });
-
-    res.status(200).json({ success: true, message: 'Kart başarıyla silindi.' });
-  } catch (error) {
-    console.error('Kart Silme Hatası:', error);
-    res.status(500).json({ success: false, message: 'Kart silinemedi.' });
-  }
+export async function addAddress(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({ success: false, message: 'Kayıtlı adres özelliği kaldırılmıştır.' });
 }
 
+export async function updateAddress(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({ success: false, message: 'Kayıtlı adres özelliği kaldırılmıştır.' });
+}
 
+export async function deleteAddress(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({ success: false, message: 'Kayıtlı adres özelliği kaldırılmıştır.' });
+}
+
+export async function getCards(_req: Request, res: Response): Promise<void> {
+  res.status(200).json({ success: true, cards: [] });
+}
+
+export async function addCard(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({ success: false, message: 'Kart saklama özelliği kaldırılmıştır.' });
+}
+
+export async function deleteCard(_req: Request, res: Response): Promise<void> {
+  res.status(410).json({ success: false, message: 'Kart saklama özelliği kaldırılmıştır.' });
+}

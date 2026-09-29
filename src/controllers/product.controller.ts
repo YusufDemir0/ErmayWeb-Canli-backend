@@ -2,28 +2,52 @@ import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
-import { getOrSetCache, invalidateCachePattern, delCache } from '../utils/cache';
+import { getOrSetCache, invalidateCachePattern } from '../utils/cache';
 import { erpIntegrationService } from '../services/erpIntegration.service';
+
+/**
+ * Tek ve merkezi yayınlanabilirlik kuralı (canPublish).
+ * Kural: En az 1 görsel, Fiyat > 0, ERP Item ID mevcut ve arşivlenmemiş olmalı.
+ */
+export function canPublishProduct(data: {
+  images?: string[];
+  image?: string;
+  price?: number | Prisma.Decimal;
+  erpItemId?: string | null;
+  archivedAt?: Date | null;
+}): boolean {
+  const cleanImages = (data.images || []).filter((img) => typeof img === 'string' && img.trim().length > 0);
+  const hasImage = cleanImages.length > 0 || (typeof data.image === 'string' && data.image.trim().length > 0);
+  const priceVal = data.price ? Number(data.price) : 0;
+  const hasPrice = priceVal > 0;
+  const hasErpId = Boolean(data.erpItemId && String(data.erpItemId).trim().length > 0);
+  const notArchived = !data.archivedAt;
+
+  return Boolean(hasImage && hasPrice && hasErpId && notArchived);
+}
 
 export async function getProducts(req: Request, res: Response): Promise<void> {
   try {
     const { category, search, minPrice, maxPrice, sort, page = '1', limit = '24' } = req.query;
 
     const pageNum = Math.max(1, parseInt(page as string, 10));
-    const limitNum = Math.min(48, Math.max(1, parseInt(limit as string, 10) || 24));
+    const limitNum = Math.min(60, Math.max(1, parseInt(limit as string, 10) || 24));
     const skip = (pageNum - 1) * limitNum;
 
-    const cacheKey = `products:list:${pageNum}:${limitNum}:${category || ''}:${search || ''}:${minPrice || ''}:${maxPrice || ''}:${sort || ''}:${req.query.includeUnpublished || ''}`;
+    const userRole = (req as { user?: { role?: string } }).user?.role;
+    const isAdmin = userRole === 'ADMIN';
+    const includeUnpublished = isAdmin && req.query.includeUnpublished === 'true';
+
+    const cacheKey = `products:list:${pageNum}:${limitNum}:${category || ''}:${search || ''}:${minPrice || ''}:${maxPrice || ''}:${sort || ''}:${includeUnpublished}`;
 
     const cachedResult = await getOrSetCache(cacheKey, 120, async () => {
       const where: Prisma.ProductWhereInput = {};
       const andFilters: Prisma.ProductWhereInput[] = [];
 
-      const includeUnpublished = req.query.includeUnpublished === 'true';
       if (!includeUnpublished) {
         andFilters.push({
           isPublished: true,
-          erpItemId: { not: null },
+          archivedAt: null,
         });
       }
 
@@ -71,7 +95,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
       let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
       if (sort === 'price_asc') orderBy = { price: 'asc' };
       if (sort === 'price_desc') orderBy = { price: 'desc' };
-      if (sort === 'popular') orderBy = { salesCount: 'desc' };
+      if (sort === 'popular') orderBy = { createdAt: 'desc' };
 
       const [products, totalCount] = await Promise.all([
         prisma.product.findMany({
@@ -83,44 +107,45 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
             id: true,
             slug: true,
             name: true,
+            description: true,
             price: true,
             originalPrice: true,
             stock: true,
             inStock: true,
-            salesCount: true,
             image: true,
             images: true,
+            features: true,
+            colors: true,
+            badge: true,
             isPublished: true,
             material: true,
+            dimensions: true,
             widthCm: true,
             heightCm: true,
             depthCm: true,
+            leadTimeDays: true,
+            setPieces: true,
             erpItemId: true,
+            erpItemCode: true,
             category: {
               select: { id: true, name: true, slug: true },
-            },
-            variants: {
-              select: {
-                id: true,
-                sku: true,
-                color: true,
-                price: true,
-                stock: true,
-              },
             },
           },
         }),
         prisma.product.count({ where }),
       ]);
 
+      const serializedProducts = products.map((p) => ({
+        ...p,
+        price: Number(p.price),
+        originalPrice: p.originalPrice ? Number(p.originalPrice) : null,
+      }));
+
       return {
-        pagination: {
-          total: totalCount,
-          page: pageNum,
-          limit: limitNum,
-          totalPages: Math.ceil(totalCount / limitNum),
-        },
-        products,
+        products: serializedProducts,
+        total: totalCount,
+        page: pageNum,
+        totalPages: Math.ceil(totalCount / limitNum),
       };
     });
 
@@ -137,17 +162,19 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
 export async function getProductById(req: Request, res: Response): Promise<void> {
   try {
     const productId = req.params.id as string;
-    const includeUnpublished = req.query.includeUnpublished === 'true';
+    const userRole = (req as { user?: { role?: string } }).user?.role;
+    const isAdmin = userRole === 'ADMIN';
+    const includeUnpublished = isAdmin && req.query.includeUnpublished === 'true';
     const cacheKey = `products:detail:${productId}:${includeUnpublished}`;
 
     const product = await getOrSetCache(cacheKey, 300, async () => {
       return prisma.product.findFirst({
         where: {
           OR: [{ id: productId }, { slug: productId }],
+          ...(includeUnpublished ? {} : { archivedAt: null }),
         },
         include: {
           category: true,
-          variants: true,
         },
       });
     });
@@ -165,7 +192,14 @@ export async function getProductById(req: Request, res: Response): Promise<void>
       return;
     }
 
-    res.status(200).json({ success: true, product });
+    const serialized = {
+      ...product,
+      price: Number(product.price),
+      originalPrice: product.originalPrice ? Number(product.originalPrice) : null,
+      vatRate: Number(product.vatRate),
+    };
+
+    res.status(200).json({ success: true, product: serialized });
   } catch (error: unknown) {
     res.status(500).json({ success: false, message: 'Ürün detayı alınamadı.' });
   }
@@ -173,9 +207,30 @@ export async function getProductById(req: Request, res: Response): Promise<void>
 
 export async function createProduct(req: Request, res: Response): Promise<void> {
   try {
-    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, image, images, features, colors, vatRate, erpItemId, erpItemCode, widthCm, heightCm, depthCm } = req.body;
+    const {
+      name,
+      categoryId,
+      category,
+      description,
+      material,
+      dimensions,
+      price,
+      originalPrice,
+      stock,
+      image,
+      images,
+      features,
+      colors,
+      erpItemId,
+      erpItemCode,
+      widthCm,
+      heightCm,
+      depthCm,
+      badge,
+      isPublished,
+    } = req.body;
 
-    if (!name || !price) {
+    if (!name || price === undefined || price === null) {
       res.status(400).json({ success: false, message: 'Ürün adı ve fiyatı zorunludur.' });
       return;
     }
@@ -183,22 +238,16 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
     if (!erpItemId || String(erpItemId).trim() === '') {
       res.status(400).json({
         success: false,
-        message: 'CRM ERP sisteminde bulunmayan veya ERP ID (erpItemId) eşleşmesi yapılmamış ürün eklenemez. Lütfen ürünü ERP Sisteminden içe aktarınız / senkronize ediniz.',
+        message: 'CRM ERP sisteminde bulunmayan veya ERP ID (erpItemId) eşleşmesi yapılmamış ürün eklenemez.',
       });
       return;
     }
 
     let catId = categoryId;
-    // Slug veya ID üzerinden dinamik kategori bulma:
     const catSearch = typeof category === 'object' && category !== null ? (category as { id?: string; slug?: string }).id || (category as { id?: string; slug?: string }).slug : category;
     if (!catId && catSearch) {
       const found = await prisma.category.findFirst({
         where: { OR: [{ id: String(catSearch) }, { slug: String(catSearch) }] },
-      });
-      if (found) catId = found.id;
-    } else if (catId) {
-      const found = await prisma.category.findFirst({
-        where: { OR: [{ id: String(catId) }, { slug: String(catId) }] },
       });
       if (found) catId = found.id;
     }
@@ -208,159 +257,178 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       catId = firstCat ? firstCat.id : (await prisma.category.create({ data: { name: 'Genel', slug: 'genel' } })).id;
     }
 
-    const normalizedImages = Array.isArray(images)
+    const cleanImages = Array.isArray(images)
       ? images.filter((img: unknown) => typeof img === 'string' && img.trim().length > 0)
       : image
       ? [image]
       : [];
 
-    const mainImage = image || normalizedImages[0] || '';
-    const stockNum = stock !== undefined && stock !== '' ? parseInt(String(stock), 10) : 10;
+    const mainImage = image || cleanImages[0] || '';
+    const stockNum = stock !== undefined && stock !== '' ? parseInt(String(stock), 10) : 0;
+    const priceNum = parseFloat(String(price));
 
-    const normalizedColors = Array.isArray(colors)
-      ? colors.map((c: unknown) => {
-          if (typeof c === 'string') return c;
-          if (c && typeof c === 'object' && 'name' in c && typeof (c as { name?: unknown }).name === 'string') {
-            return (c as { name: string }).name;
-          }
-          return JSON.stringify(c);
-        })
-      : [];
-
-    // ERP ID ile eşleşen mevcut bir ürün var mı kontrol et (Upsert mantığı)
-    const existingProduct = await prisma.product.findUnique({
-      where: { erpItemId: String(erpItemId) },
+    const publishAllowed = canPublishProduct({
+      images: cleanImages,
+      image: mainImage,
+      price: priceNum,
+      erpItemId: String(erpItemId),
+      archivedAt: null,
     });
 
-    if (existingProduct) {
-      const updated = await prisma.product.update({
-        where: { id: existingProduct.id },
-        data: {
-          name: name.trim(),
-          category: { connect: { id: catId } },
-          description: description !== undefined ? description : existingProduct.description,
-          material: material || existingProduct.material,
-          dimensions: dimensions || existingProduct.dimensions,
-          price: parseFloat(price),
-          originalPrice: originalPrice ? parseFloat(originalPrice) : null,
-          stock: stockNum,
-          inStock: stockNum > 0,
-          image: mainImage,
-          images: normalizedImages.length > 0 ? normalizedImages : (mainImage ? [mainImage] : []),
-          features: Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : existingProduct.features,
-          colors: normalizedColors.length > 0 ? normalizedColors : existingProduct.colors,
-          vatRate: vatRate ? parseFloat(vatRate) : existingProduct.vatRate,
-          widthCm: widthCm ? parseInt(String(widthCm), 10) : existingProduct.widthCm,
-          heightCm: heightCm ? parseInt(String(heightCm), 10) : existingProduct.heightCm,
-          depthCm: depthCm ? parseInt(String(depthCm), 10) : existingProduct.depthCm,
-          erpItemCode: erpItemCode ? String(erpItemCode) : existingProduct.erpItemCode,
-          isPublished: true,
-        },
-      });
+    const targetPublish = Boolean(isPublished) && publishAllowed;
 
-      await invalidateCachePattern('products:*');
-      res.status(200).json({ success: true, message: 'ERP ile eşleşen ürün başarıyla güncellendi ve yayına alındı.', product: updated });
-      return;
-    }
+    const slug = `${slugifyTurkish(name)}-${Date.now().toString().slice(-5)}`;
 
-    const slug = slugifyTurkish(name) + '-' + Date.now().toString().slice(-6);
+    const cleanColors: string[] = Array.isArray(colors)
+      ? colors
+          .map((c: unknown) => {
+            if (typeof c === 'string') return c.trim();
+            if (c && typeof c === 'object') {
+              const cObj = c as { name?: string; id?: string };
+              return (cObj.name || cObj.id || '').trim();
+            }
+            return String(c).trim();
+          })
+          .filter(Boolean)
+      : typeof colors === 'string' && colors.trim().length > 0
+      ? [colors.trim()]
+      : [];
 
-    const createInput: Prisma.ProductCreateInput = {
-      name: name.trim(),
-      slug,
-      category: { connect: { id: catId } },
-      description: description || '',
-      material: material || 'Masif Ahşap & Kumaş',
-      dimensions: dimensions || 'G: 220cm | D: 95cm | Y: 75cm',
-      price: parseFloat(price),
-      originalPrice: originalPrice ? parseFloat(originalPrice) : null,
-      stock: stockNum,
-      inStock: stockNum > 0,
-      image: mainImage,
-      images: normalizedImages.length > 0 ? normalizedImages : (mainImage ? [mainImage] : []),
-      features: Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : [],
-      colors: normalizedColors,
-      vatRate: vatRate ? parseFloat(vatRate) : 0.20,
-      widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
-      heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
-      depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
-      erpItemId: String(erpItemId),
-      erpItemCode: erpItemCode ? String(erpItemCode) : null,
-      isPublished: true,
-    };
-
-    const product = await prisma.product.create({
-      data: createInput,
+    const savedProduct = await prisma.product.upsert({
+      where: { erpItemId: String(erpItemId) },
+      update: {
+        name: name.trim(),
+        categoryId: catId,
+        description: description || '',
+        material: material || '',
+        dimensions: dimensions || '',
+        price: priceNum,
+        originalPrice: originalPrice ? parseFloat(String(originalPrice)) : null,
+        stock: stockNum,
+        inStock: stockNum > 0,
+        image: mainImage,
+        images: cleanImages,
+        features: Array.isArray(features) ? features : [],
+        colors: cleanColors,
+        badge: badge || null,
+        widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
+        heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
+        depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+        isPublished: targetPublish,
+        erpItemCode: erpItemCode || null,
+        archivedAt: null,
+      },
+      create: {
+        name: name.trim(),
+        slug,
+        categoryId: catId,
+        description: description || '',
+        material: material || '',
+        dimensions: dimensions || '',
+        price: priceNum,
+        originalPrice: originalPrice ? parseFloat(String(originalPrice)) : null,
+        stock: stockNum,
+        inStock: stockNum > 0,
+        image: mainImage,
+        images: cleanImages,
+        features: Array.isArray(features) ? features : [],
+        colors: cleanColors,
+        badge: badge || null,
+        widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
+        heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
+        depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+        erpItemId: String(erpItemId),
+        erpItemCode: erpItemCode || null,
+        isPublished: targetPublish,
+      },
     });
 
     await invalidateCachePattern('products:*');
 
-    res.status(201).json({ success: true, message: 'Ürün başarıyla eklendi.', product });
+    res.status(201).json({
+      success: true,
+      message: 'Ürün başarıyla kaydedildi.',
+      product: savedProduct,
+    });
   } catch (error: unknown) {
-    console.error('Ürün Ekleme Hatası:', error);
-    const msg = error instanceof Error ? error.message : 'Ürün eklenirken bir hata oluştu.';
-    res.status(400).json({ success: false, message: msg });
+    console.error('Ürün Oluşturma Hatası:', error);
+    const msg = error instanceof Error ? error.message : 'Ürün oluşturulamadı.';
+    res.status(500).json({ success: false, message: msg });
   }
 }
 
 export async function updateProduct(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
-    const { name, categoryId, category, description, material, dimensions, price, originalPrice, stock, inStock, image, images, features, vatRate, isPublished, erpItemId, erpItemCode } = req.body;
+    const body = req.body;
 
-    const dataToUpdate: Prisma.ProductUpdateInput = {};
-    if (name) dataToUpdate.name = name;
-
-    let targetCatId = categoryId;
-    if (!targetCatId && category) {
-      const found = await prisma.category.findFirst({
-        where: { OR: [{ id: String(category) }, { slug: String(category) }] },
-      });
-      if (found) targetCatId = found.id;
-    } else if (targetCatId) {
-      const found = await prisma.category.findFirst({
-        where: { OR: [{ id: String(targetCatId) }, { slug: String(targetCatId) }] },
-      });
-      if (found) targetCatId = found.id;
+    const existing = await prisma.product.findUnique({ where: { id } });
+    if (!existing) {
+      res.status(404).json({ success: false, message: 'Güncellenecek ürün bulunamadı.' });
+      return;
     }
 
-    if (targetCatId) dataToUpdate.category = { connect: { id: targetCatId } };
-    if (description !== undefined) dataToUpdate.description = description;
-    if (material !== undefined) dataToUpdate.material = material;
-    if (dimensions !== undefined) dataToUpdate.dimensions = dimensions;
-    if (price !== undefined) dataToUpdate.price = parseFloat(price);
-    if (originalPrice !== undefined) dataToUpdate.originalPrice = originalPrice ? parseFloat(originalPrice) : null;
-    
-    if (stock !== undefined && stock !== '') {
-      const parsedStock = parseInt(String(stock), 10);
-      dataToUpdate.stock = parsedStock;
-      dataToUpdate.inStock = inStock !== undefined ? Boolean(inStock) : parsedStock > 0;
-    } else if (inStock !== undefined) {
-      dataToUpdate.inStock = Boolean(inStock);
-    }
+    const cleanImages = body.images !== undefined
+      ? (Array.isArray(body.images) ? body.images.filter((img: unknown) => typeof img === 'string' && img.trim().length > 0) : [])
+      : existing.images;
 
-    if (image !== undefined) dataToUpdate.image = image;
-    if (images !== undefined) {
-      const cleanImages = Array.isArray(images) ? images.filter((img: unknown): img is string => typeof img === 'string' && img.trim().length > 0) : [];
-      dataToUpdate.images = cleanImages;
-      if (cleanImages.length > 0 && !image) {
-        dataToUpdate.image = cleanImages[0];
-      }
-    }
-    if (features !== undefined) dataToUpdate.features = Array.isArray(features) ? features.filter((f: unknown): f is string => typeof f === 'string') : [];
-    if (vatRate !== undefined) dataToUpdate.vatRate = parseFloat(vatRate);
-    if (isPublished !== undefined) dataToUpdate.isPublished = Boolean(isPublished);
-    if (erpItemId !== undefined) dataToUpdate.erpItemId = erpItemId ? String(erpItemId) : null;
-    if (erpItemCode !== undefined) dataToUpdate.erpItemCode = erpItemCode ? String(erpItemCode) : null;
+    const mainImage = body.image !== undefined ? body.image : (cleanImages[0] || existing.image);
+    const priceNum = body.price !== undefined ? parseFloat(String(body.price)) : Number(existing.price);
 
-    const product = await prisma.product.update({
+    const publishCandidate = body.isPublished !== undefined ? Boolean(body.isPublished) : existing.isPublished;
+    const publishAllowed = canPublishProduct({
+      images: cleanImages,
+      image: mainImage,
+      price: priceNum,
+      erpItemId: existing.erpItemId,
+      archivedAt: existing.archivedAt,
+    });
+
+    const isPublished = publishCandidate && publishAllowed;
+
+    const cleanUpdateColors = body.colors !== undefined
+      ? (Array.isArray(body.colors)
+          ? body.colors
+              .map((c: unknown) => {
+                if (typeof c === 'string') return c.trim();
+                if (c && typeof c === 'object') {
+                  const cObj = c as { name?: string; id?: string };
+                  return (cObj.name || cObj.id || '').trim();
+                }
+                return String(c).trim();
+              })
+              .filter(Boolean)
+          : typeof body.colors === 'string' && body.colors.trim().length > 0
+          ? [body.colors.trim()]
+          : [])
+      : undefined;
+
+    const updated = await prisma.product.update({
       where: { id },
-      data: dataToUpdate,
+      data: {
+        ...(body.name && { name: body.name.trim() }),
+        ...(body.categoryId && { categoryId: body.categoryId }),
+        ...(body.description !== undefined && { description: body.description }),
+        ...(body.material !== undefined && { material: body.material }),
+        ...(body.dimensions !== undefined && { dimensions: body.dimensions }),
+        ...(body.price !== undefined && { price: priceNum }),
+        ...(body.originalPrice !== undefined && { originalPrice: body.originalPrice ? parseFloat(String(body.originalPrice)) : null }),
+        ...(body.stock !== undefined && { stock: parseInt(String(body.stock), 10), inStock: parseInt(String(body.stock), 10) > 0 }),
+        ...(body.image !== undefined && { image: mainImage }),
+        ...(body.images !== undefined && { images: cleanImages }),
+        ...(body.features !== undefined && { features: Array.isArray(body.features) ? body.features : [] }),
+        ...(cleanUpdateColors !== undefined && { colors: cleanUpdateColors }),
+        ...(body.badge !== undefined && { badge: body.badge }),
+        ...(body.widthCm !== undefined && { widthCm: body.widthCm ? parseInt(String(body.widthCm), 10) : null }),
+        ...(body.heightCm !== undefined && { heightCm: body.heightCm ? parseInt(String(body.heightCm), 10) : null }),
+        ...(body.depthCm !== undefined && { depthCm: body.depthCm ? parseInt(String(body.depthCm), 10) : null }),
+        isPublished,
+      },
     });
 
     await invalidateCachePattern('products:*');
 
-    res.status(200).json({ success: true, message: 'Ürün güncellendi.', product });
+    res.status(200).json({ success: true, message: 'Ürün güncellendi.', product: updated });
   } catch (error: unknown) {
     console.error('Ürün Güncelleme Hatası:', error);
     const msg = error instanceof Error ? error.message : 'Ürün güncellenemedi.';
@@ -368,17 +436,25 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
   }
 }
 
+/**
+ * DELETE /api/v1/admin/products/:id
+ * Soft delete: sets archivedAt = now() and isPublished = false.
+ */
 export async function deleteProduct(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
 
-    await prisma.product.delete({
+    await prisma.product.update({
       where: { id },
+      data: {
+        archivedAt: new Date(),
+        isPublished: false,
+      },
     });
 
     await invalidateCachePattern('products:*');
 
-    res.status(200).json({ success: true, message: 'Ürün silindi.' });
+    res.status(200).json({ success: true, message: 'Ürün arşive kaldırıldı (Soft Delete).' });
   } catch (error: unknown) {
     console.error('Ürün Silme Hatası:', error);
     const msg = error instanceof Error ? error.message : 'Ürün silinemedi.';
@@ -388,7 +464,7 @@ export async function deleteProduct(req: Request, res: Response): Promise<void> 
 
 export async function bulkLinkErpProducts(req: Request, res: Response): Promise<void> {
   try {
-    const { erpItemIds, categoryId, isPublished = true } = req.body;
+    const { erpItemIds, categoryId } = req.body;
 
     if (!Array.isArray(erpItemIds) || erpItemIds.length === 0) {
       res.status(400).json({ success: false, message: 'En az bir ERP ürünü seçilmelidir.' });
@@ -400,7 +476,6 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
       return;
     }
 
-    // Kategori var mı doğrula (ID veya Slug üzerinden)
     const targetCat = await prisma.category.findFirst({
       where: { OR: [{ id: String(categoryId) }, { slug: String(categoryId) }] },
     });
@@ -410,8 +485,7 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
       return;
     }
 
-    // CRM ERP'den güncel katalog bilgilerini çek (isim, fiyat vb. için)
-    const erpMap = new Map<string, { erpId: string; erpCode: string; erpName: string; erpSalePrice: number; erpStock: number }>();
+    const erpMap = new Map<string, { erpId: string; erpCode: string; erpName: string; erpSalePrice: number; erpStock: number; erpImage: string | null }>();
     try {
       const erpItems = await erpIntegrationService.fetchErpItems();
       for (const item of erpItems) {
@@ -421,10 +495,13 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
           erpName: item.name,
           erpSalePrice: item.salePrice,
           erpStock: item.totalStock,
+          erpImage: item.image,
         });
       }
     } catch {
-      // ERP servisi o an erişilemezse sadece ID üzerinden bağlama yapılır
+      // ERP servisine ulaşılamazsa işlem yapılamaz
+      res.status(503).json({ success: false, message: 'ERP servisine ulaşılamadı. Toplu bağlama ertelendi.' });
+      return;
     }
 
     let processedCount = 0;
@@ -434,26 +511,38 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
       if (!erpIdStr) continue;
 
       const erpInfo = erpMap.get(erpIdStr);
+      if (!erpInfo) continue; // ERP'de kaydı olmayan ürünü bağlama
+
       const existingProduct = await prisma.product.findUnique({
         where: { erpItemId: erpIdStr },
       });
+
+      const images = erpInfo.erpImage ? [erpInfo.erpImage] : [];
+      const image = erpInfo.erpImage || '';
 
       if (existingProduct) {
         await prisma.product.update({
           where: { id: existingProduct.id },
           data: {
             categoryId: targetCat.id,
-            isPublished: Boolean(isPublished),
-            ...(erpInfo && {
-              erpItemCode: erpInfo.erpCode,
-            }),
+            price: erpInfo.erpSalePrice,
+            stock: erpInfo.erpStock,
+            inStock: erpInfo.erpStock > 0,
+            erpItemCode: erpInfo.erpCode,
+            lastSyncedAt: new Date(),
           },
         });
       } else {
-        const prodName = erpInfo?.erpName || `ERP Ürün #${erpIdStr}`;
-        const prodSlug = slugifyTurkish(prodName) + '-' + erpIdStr;
-        const prodPrice = erpInfo?.erpSalePrice ? Number(erpInfo.erpSalePrice) : 1000;
-        const prodStock = erpInfo?.erpStock ? Number(erpInfo.erpStock) : 10;
+        const prodName = erpInfo.erpName;
+        const prodSlug = slugifyTurkish(prodName) + '-' + erpIdStr.slice(-5);
+
+        // Görsel yoksa isPublished kesinlikle false kalır!
+        const canPublish = canPublishProduct({
+          images,
+          image,
+          price: erpInfo.erpSalePrice,
+          erpItemId: erpIdStr,
+        });
 
         await prisma.product.create({
           data: {
@@ -461,16 +550,17 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
             slug: prodSlug,
             categoryId: targetCat.id,
             erpItemId: erpIdStr,
-            erpItemCode: erpInfo?.erpCode || null,
-            price: prodPrice,
-            stock: prodStock,
-            inStock: prodStock > 0,
-            image: '',
-            images: [],
+            erpItemCode: erpInfo.erpCode,
+            price: erpInfo.erpSalePrice,
+            stock: erpInfo.erpStock,
+            inStock: erpInfo.erpStock > 0,
+            image,
+            images,
             description: `${prodName} - Ermay Mobilya Atölye Üretimi`,
-            material: 'Masif Ahşap & Kumaş',
+            material: 'Lüks Ermay Mobilya Atölye Üretimi',
             dimensions: 'G: Standart | D: Standart | Y: Standart',
-            isPublished: Boolean(isPublished),
+            isPublished: canPublish,
+            lastSyncedAt: new Date(),
           },
         });
       }

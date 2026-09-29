@@ -1,26 +1,36 @@
-import { redis } from '../config/redis';
+// In-memory LRU / TTL cache implementation for single-instance catalog caching
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
 
-// In-flight deduplication against cache stampedes
+const memoryStore = new Map<string, CacheEntry<unknown>>();
 const pendingFetches = new Map<string, Promise<unknown>>();
+const MAX_CACHE_ENTRIES = 2000;
+
+// Periodic cleanup of expired keys (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of memoryStore.entries()) {
+    if (entry.expiresAt <= now) {
+      memoryStore.delete(key);
+    }
+  }
+}, 5 * 60 * 1000).unref();
 
 /**
- * High-performance safe Redis caching utility with automatic fallback & in-flight stampede protection.
- * If Redis is unavailable or times out, it directly executes the fetcher function.
+ * In-memory safe cache utility with in-flight stampede protection.
  */
 export async function getOrSetCache<T>(
   key: string,
   ttlSeconds: number,
   fetcher: () => Promise<T>
 ): Promise<T> {
-  try {
-    if (redis.status === 'ready') {
-      const cached = await redis.get(key);
-      if (cached) {
-        return JSON.parse(cached) as T;
-      }
-    }
-  } catch (err) {
-    // Silently proceed to database query on cache miss or Redis read error
+  const now = Date.now();
+  const cached = memoryStore.get(key);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.data as T;
   }
 
   // Deduplicate concurrent in-flight executions for the same cache key
@@ -33,8 +43,16 @@ export async function getOrSetCache<T>(
     try {
       const freshData = await fetcher();
 
-      if (redis.status === 'ready' && freshData !== undefined && freshData !== null) {
-        await redis.setex(key, ttlSeconds, JSON.stringify(freshData)).catch(() => {});
+      if (freshData !== undefined && freshData !== null) {
+        if (memoryStore.size >= MAX_CACHE_ENTRIES) {
+          // Evict the oldest key
+          const firstKey = memoryStore.keys().next().value;
+          if (firstKey) memoryStore.delete(firstKey);
+        }
+        memoryStore.set(key, {
+          data: freshData,
+          expiresAt: Date.now() + ttlSeconds * 1000,
+        });
       }
 
       return freshData;
@@ -48,36 +66,16 @@ export async function getOrSetCache<T>(
 }
 
 /**
- * Invalidate all Redis keys matching a pattern (e.g. "products:*", "categories:*") safely awaiting stream completion.
+ * Invalidate all in-memory keys matching a regex or prefix pattern (e.g. "products:*", "categories:*").
  */
 export async function invalidateCachePattern(pattern: string): Promise<void> {
-  try {
-    if (redis.status !== 'ready') return;
-    const stream = redis.scanStream({
-      match: pattern,
-      count: 200,
-    });
+  const regexStr = '^' + pattern.replace(/\*/g, '.*') + '$';
+  const regex = new RegExp(regexStr);
 
-    await new Promise<void>((resolve, reject) => {
-      stream.on('data', async (keys: string[]) => {
-        if (keys.length > 0) {
-          try {
-            const pipeline = redis.pipeline();
-            keys.forEach((k) => pipeline.del(k));
-            await pipeline.exec();
-          } catch (delErr) {
-            console.warn('Pipeline delete warning:', delErr);
-          }
-        }
-      });
-      stream.on('end', () => resolve());
-      stream.on('error', (err) => {
-        console.warn(`Scan stream error for pattern ${pattern}:`, err);
-        resolve(); // resolve gracefully so caller is never blocked
-      });
-    });
-  } catch (err) {
-    console.warn(`Cache invalidation failed for pattern ${pattern}:`, err);
+  for (const key of memoryStore.keys()) {
+    if (regex.test(key)) {
+      memoryStore.delete(key);
+    }
   }
 }
 
@@ -85,11 +83,5 @@ export async function invalidateCachePattern(pattern: string): Promise<void> {
  * Delete a specific cache key.
  */
 export async function delCache(key: string): Promise<void> {
-  try {
-    if (redis.status === 'ready') {
-      await redis.del(key);
-    }
-  } catch (err) {
-    // Non-critical
-  }
+  memoryStore.delete(key);
 }

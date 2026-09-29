@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
+import crypto from 'crypto';
 import { prisma } from '../config/database';
 import { erpIntegrationService } from '../services/erpIntegration.service';
-import { emailService } from '../services/email.service';
-import { OrderStatus, PaymentStatus } from '@prisma/client';
+import { runCatalogSync } from '../jobs/erpCatalogSync.job';
+import { RequestStatus, PaymentChannel } from '@prisma/client';
 
 export async function getErpCatalog(_req: Request, res: Response): Promise<void> {
   try {
@@ -15,6 +16,32 @@ export async function getErpCatalog(_req: Request, res: Response): Promise<void>
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'ERP ürün kataloğu alınamadı.';
     console.error('ERP Catalog Error:', error);
+    res.status(500).json({
+      success: false,
+      message: errorMsg,
+    });
+  }
+}
+
+export async function triggerManualCatalogSync(_req: Request, res: Response): Promise<void> {
+  try {
+    const report = await runCatalogSync();
+    if (!report) {
+      res.status(409).json({
+        success: false,
+        message: 'Katalog senkronizasyonu şu anda başka bir işlem tarafından yürütülüyor. Lütfen birkaç saniye sonra tekrar deneyin.',
+      });
+      return;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Katalog senkronizasyonu başarıyla tamamlandı.',
+      report,
+    });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'Katalog senkronizasyonu başarısız oldu.';
+    console.error('Manual Catalog Sync Error:', error);
     res.status(500).json({
       success: false,
       message: errorMsg,
@@ -62,91 +89,84 @@ export async function syncProduct(req: Request, res: Response): Promise<void> {
 export async function handleErpSaleApprovedWebhook(req: Request, res: Response): Promise<void> {
   try {
     const providedKey = req.headers['x-integration-key'];
-    const expectedKey = process.env.ERP_INTEGRATION_KEY || 'ermay_web_erp_secure_key_2026';
+    const expectedKey = process.env.ERP_INTEGRATION_KEY;
 
-    if (!providedKey || providedKey !== expectedKey) {
+    if (!expectedKey || !providedKey || typeof providedKey !== 'string') {
+      res.status(401).json({ success: false, message: 'Geçersiz veya eksik entegrasyon anahtarı.' });
+      return;
+    }
+
+    const providedBuf = Buffer.from(providedKey);
+    const expectedBuf = Buffer.from(expectedKey);
+
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
       res.status(401).json({ success: false, message: 'Geçersiz entegrasyon anahtarı.' });
       return;
     }
 
-    const { saleCode, saleId, customerEmail } = req.body;
+    const { saleCode, saleId, externalRef } = req.body;
 
-    if (!saleCode && !saleId) {
-      res.status(400).json({ success: false, message: 'saleCode veya saleId eksik.' });
+    if (!saleCode && !saleId && !externalRef) {
+      res.status(400).json({ success: false, message: 'saleCode, saleId veya externalRef eksik.' });
       return;
     }
 
-    // Find the order in ErmayWeb database
-    const order = await prisma.order.findFirst({
+    // Find the request in ErmayWeb database
+    const orderRequest = await prisma.orderRequest.findFirst({
       where: {
         OR: [
-          { orderNumber: saleCode },
-          { erpSaleCode: saleCode },
-          { erpSaleId: String(saleId) },
+          ...(externalRef ? [{ id: String(externalRef) }] : []),
+          ...(saleCode ? [{ erpSaleCode: String(saleCode) }] : []),
+          ...(saleId ? [{ erpSaleId: String(saleId) }] : []),
         ],
       },
       include: {
-        items: {
-          include: {
-            product: true,
-            variant: true,
-          },
-        },
+        items: true,
       },
     });
 
-    if (order) {
-      // Update order to confirmed status
-      await prisma.order.update({
-        where: { id: order.id },
-        data: {
-          orderStatus: OrderStatus.PAYMENT_CONFIRMED,
-          paymentStatus: PaymentStatus.PAID,
-        },
-      });
+    if (orderRequest) {
+      // Transition to PAID_OFFLINE if eligible
+      const eligibleStatuses: RequestStatus[] = [
+        RequestStatus.NEW,
+        RequestStatus.CONTACTED,
+        RequestStatus.STORE_VISIT_SCHEDULED,
+        RequestStatus.AWAITING_PAYMENT,
+      ];
+      const canTransition = eligibleStatuses.includes(orderRequest.status);
 
-      // Send branded order & payment approved confirmation email
-      const emailToSend = customerEmail || order.customerEmail;
-      if (emailToSend) {
-        try {
-          await emailService.sendOrderApprovedEmail({
-            orderNumber: order.orderNumber,
-            customerName: order.customerName || 'Değerli Müşterimiz',
-            customerEmail: emailToSend,
-            customerPhone: order.customerPhone || '',
-            totalAmount: Number(order.totalAmount),
-            taxAmount: Number(order.taxAmount),
-            discountAmount: Number(order.discountAmount),
-            paymentMethod: order.paymentMethod,
-            shippingAddress: {
-              fullName: order.customerName || '',
-              phone: order.customerPhone || '',
-              city: order.shippingCity || '',
-              district: order.shippingDistrict || '',
-              addressLine: order.shippingAddressLine || '',
+      await prisma.$transaction(async (tx) => {
+        if (canTransition) {
+          await tx.orderRequest.update({
+            where: { id: orderRequest.id },
+            data: {
+              status: RequestStatus.PAID_OFFLINE,
+              paymentChannel: PaymentChannel.WHATSAPP_TRANSFER,
+              erpSaleId: saleId ? String(saleId) : orderRequest.erpSaleId,
+              erpSaleCode: saleCode ? String(saleCode) : orderRequest.erpSaleCode,
+              erpSyncStatus: 'SYNCED',
             },
-            items: order.items.map((it) => ({
-              name: it.product?.name || 'Mobilya',
-              quantity: it.quantity,
-              unitPrice: Number(it.unitPrice),
-              totalPrice: Number(it.totalPrice),
-              variant: it.variant?.color || undefined,
-            })),
           });
-        } catch (emailErr: unknown) {
-          console.error('Order approval email sending failed:', emailErr);
         }
-      }
+
+        await tx.orderRequestEvent.create({
+          data: {
+            requestId: orderRequest.id,
+            type: 'WEBHOOK',
+            fromStatus: orderRequest.status,
+            toStatus: canTransition ? RequestStatus.PAID_OFFLINE : orderRequest.status,
+            note: `ERP satış onay webhook'u işlendi (SaleCode: ${saleCode || '-'}).`,
+          },
+        });
+      });
     }
 
     res.status(200).json({
       success: true,
-      message: 'ERP Satış onayı başarıyla işlendi ve müşteriye bilgilendirme maili iletildi.',
-      orderFound: Boolean(order),
+      message: 'ERP Satış onayı başarıyla işlendi.',
     });
   } catch (error: unknown) {
-    const errorMsg = error instanceof Error ? error.message : 'Webhook işlenemedi.';
     console.error('ERP Webhook Error:', error);
-    res.status(500).json({ success: false, message: errorMsg });
+    res.status(500).json({ success: false, message: 'Webhook işlenirken hata oluştu.' });
   }
 }

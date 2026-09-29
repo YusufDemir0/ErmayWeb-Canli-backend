@@ -21,7 +21,7 @@ export function authenticateToken(req: AuthenticatedRequest, res: Response, next
       if (k && v) acc[k] = decodeURIComponent(v);
       return acc;
     }, {});
-    token = cookies['auth_token'] || cookies['admin_jwt_token'];
+    token = cookies['ermay_admin'] || cookies['admin_jwt_token'] || cookies['auth_token'];
   }
 
   if (!token) {
@@ -62,7 +62,7 @@ export function authenticateOptionalToken(req: AuthenticatedRequest, _res: Respo
       if (k && v) acc[k] = decodeURIComponent(v);
       return acc;
     }, {});
-    token = cookies['auth_token'] || cookies['admin_jwt_token'];
+    token = cookies['ermay_admin'] || cookies['admin_jwt_token'] || cookies['auth_token'];
   }
 
   if (token) {

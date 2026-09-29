@@ -1,29 +1,15 @@
 /**
  * Telegram Bot Notification Service
- * Sends real-time order alerts and administrative digests to Telegram channels or chats.
+ * Sends masked, KVKK-compliant notifications to Telegram without customer PII (Finding N8).
  */
 
-interface OrderNotificationPayload {
-  orderNumber: string;
-  customerName: string;
-  customerPhone: string;
-  totalAmount: number | string;
-  paymentMethod: string;
+export interface RequestNotificationPayload {
+  code: string;
+  subtotal: number | string;
+  preference: string;
   city?: string;
   district?: string;
-  regionCode?: string;
-  deviceInfo?: {
-    deviceType?: string;
-    os?: string;
-    browser?: string;
-    screenResolution?: string;
-  } | null;
-  items: Array<{
-    name: string;
-    quantity: number;
-    price: number | string;
-    variant?: string;
-  }>;
+  itemCount: number;
 }
 
 export class TelegramService {
@@ -33,146 +19,128 @@ export class TelegramService {
     return { botToken, chatId };
   }
 
-  /**
-   * Format and send real-time notification on new web order
-   */
-  async notifyNewOrder(order: OrderNotificationPayload): Promise<{ success: boolean; message: string }> {
-    const { botToken, chatId } = this.getBotCredentials();
-
-    const deviceStr = order.deviceInfo
-      ? `${order.deviceInfo.deviceType || 'Bilinmiyor'} • ${order.deviceInfo.os || ''} (${order.deviceInfo.browser || ''})`
-      : 'Tespit Edilemedi';
-
-    const locationStr = [order.city, order.district].filter(Boolean).join(' / ') || 'Belirtilmedi';
-    const regionBadge = order.regionCode ? `[${order.regionCode}]` : '';
-
-function escapeHtml(text: string): string {
-  if (!text) return '';
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-    const customerNameSafe = escapeHtml(order.customerName);
-    const customerPhoneSafe = escapeHtml(order.customerPhone);
-    const locationStrSafe = escapeHtml(locationStr);
-    const deviceStrSafe = escapeHtml(deviceStr);
-
-    const itemsText = order.items
-      .map(
-        (i) =>
-          `• <b>${i.quantity}x ${escapeHtml(i.name)}</b> ${i.variant ? `(${escapeHtml(i.variant)})` : ''} - <i>${Number(i.price).toLocaleString('tr-TR')} TL</i>`
-      )
-      .join('\n');
-
-    const paymentText =
-      order.paymentMethod === 'CREDIT_CARD' || order.paymentMethod === 'credit_card'
-        ? '💳 Kredi Kartı (3D Secure)'
-        : order.paymentMethod === 'BANK_TRANSFER' || order.paymentMethod === 'bank_transfer'
-        ? '🏦 Banka Havalesi / EFT'
-        : escapeHtml(order.paymentMethod);
-
-    const adminPanelUrl = process.env.NEXT_PUBLIC_SITE_URL || 'http://localhost:1717';
-
-    const messageHtml = [
-      `🚨 <b>YENİ ERMAY MOBİLYA SİPARİŞİ!</b> 🚨`,
-      ``,
-      `📦 <b>Sipariş No:</b> <code>#${order.orderNumber}</code>`,
-      `👤 <b>Müşteri:</b> ${customerNameSafe}`,
-      `📞 <b>Telefon:</b> ${customerPhoneSafe}`,
-      `💰 <b>Toplam Tutar:</b> <b>${Number(order.totalAmount).toLocaleString('tr-TR')} TL</b>`,
-      `💳 <b>Ödeme Şekli:</b> ${paymentText}`,
-      `📍 <b>Teslimat Bölgesi:</b> ${regionBadge} ${locationStrSafe}`,
-      `📱 <b>Sipariş Verilen Cihaz:</b> ${deviceStrSafe}`,
-      ``,
-      `📋 <b>Sipariş Edilen Mobilyalar:</b>`,
-      itemsText,
-      ``,
-      `🔗 <a href="${adminPanelUrl}/admin?tab=orders">Yönetim Panelinden Siparişi İncele</a>`,
-    ].join('\n');
+  async sendTestMessage(customToken?: string, customChatId?: string): Promise<{ success: boolean; message: string }> {
+    const botToken = customToken || process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = customChatId || process.env.TELEGRAM_CHAT_ID;
 
     if (!botToken || !chatId) {
-      console.log(`[TELEGRAM NOTIFICATION (SIMULATED - NO TOKEN)]:\n${messageHtml.replace(/<[^>]*>/g, '')}`);
-      return {
-        success: true,
-        message: 'Telegram bilgileri (.env) henüz tanımlanmadı. Bildirim sunucu loglarına kaydedildi.',
-      };
+      return { success: false, message: 'Bot Token veya Chat ID eksik.' };
     }
 
     try {
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: messageHtml,
+          text: '✅ <b>ErmayWeb Telegram Test Bildirimi</b>\n\nSistem bildirim kanalı başarıyla bağlandı.',
           parse_mode: 'HTML',
-          disable_web_page_preview: false,
         }),
       });
 
-      const resData = (await response.json()) as { ok?: boolean; description?: string };
-
-      if (resData.ok) {
-        return { success: true, message: 'Telegram bildirimi başarıyla iletildi.' };
-      } else {
-        console.warn('[TELEGRAM ERROR]:', resData);
-        return { success: false, message: resData.description || 'Telegram bildirim hatası.' };
+      if (!response.ok) {
+        const errText = await response.text();
+        return { success: false, message: `Telegram API hatası: ${errText}` };
       }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error);
-      console.error('[TELEGRAM NETWORK ERROR]:', msg);
-      return { success: false, message: 'Telegram sunucusuna erişilemedi.' };
+
+      return { success: true, message: 'Test mesajı başarıyla iletildi.' };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, message: `Bağlantı hatası: ${msg}` };
     }
   }
 
   /**
-   * Test Telegram connection from Admin Panel
+   * Generic HTML Message sender
    */
-  async sendTestMessage(customToken?: string, customChatId?: string): Promise<{ success: boolean; message: string }> {
-    const { botToken: envToken, chatId: envChatId } = this.getBotCredentials();
-    const token = customToken || envToken;
-    const chatId = customChatId || envChatId;
-
-    if (!token || !chatId) {
-      return {
-        success: false,
-        message: 'Lütfen Telegram Bot Token ve Chat ID bilgilerini giriniz veya .env dosyasına ekleyiniz.',
-      };
+  async sendMessage(htmlMessage: string): Promise<boolean> {
+    const { botToken, chatId } = this.getBotCredentials();
+    if (!botToken || !chatId) {
+      return false;
     }
 
-    const testText = [
-      `✅ <b>ERMAY MOBİLYA TELEGRAM ENTEGRASYONU BAŞARILI!</b>`,
-      ``,
-      `Bu mesaj, Ermay Mobilya E-Ticaret sisteminden gönderilen canlı test bildirimidir.`,
-      `Artık web sitenizden gelen her siparişte anında bu kanala müşteri bilgileri ve sipariş özeti düşecektir.`,
-      ``,
-      `🕒 <b>Zaman:</b> ${new Date().toLocaleString('tr-TR')}`,
-      `🚀 <b>Durum:</b> Aktif ve Dinlemede`,
-    ].join('\n');
-
     try {
-      const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: chatId,
-          text: testText,
+          text: htmlMessage,
           parse_mode: 'HTML',
+          disable_web_page_preview: true,
         }),
       });
 
-      const data = (await response.json()) as { ok?: boolean; description?: string };
-      if (data.ok) {
-        return { success: true, message: 'Test mesajı Telegram hesabınıza başarıyla ulaştı!' };
-      } else {
-        return { success: false, message: `Telegram Hatası: ${data.description}` };
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Telegram API ile iletişim kurulamadı.';
-      return { success: false, message: `Ağ Hatası: ${msg}` };
+      return response.ok;
+    } catch (err) {
+      console.warn('Telegram API send warning:', err);
+      return false;
     }
+  }
+
+  /**
+   * Format and send masked notification for a new OrderRequest.
+   * STRICT KVKK COMPLIANCE: NO phone numbers, full names, addresses or device fingerprints.
+   */
+  async notifyNewRequest(req: RequestNotificationPayload): Promise<{ success: boolean; message: string }> {
+    const { botToken, chatId } = this.getBotCredentials();
+
+    if (!botToken || !chatId) {
+      return { success: false, message: 'Telegram Bot yapılandırması eksik (isteğe bağlı).' };
+    }
+
+    const locationStr = [req.city, req.district].filter(Boolean).join(' / ') || 'Belirtilmedi';
+    const preferenceLabel = req.preference === 'WHATSAPP' ? '🟢 WhatsApp Görüşmesi' : '🔵 Mağaza Ziyareti';
+    const amountStr = typeof req.subtotal === 'number' ? req.subtotal.toLocaleString('tr-TR') : req.subtotal;
+
+    const message = [
+      `🛋️ <b>YENİ SİPARİŞ TALEBİ</b>`,
+      ``,
+      `🔖 <b>Talep No:</b> <code>${req.code}</code>`,
+      `📍 <b>Bölge:</b> ${locationStr}`,
+      `📦 <b>Ürün Adedi:</b> ${req.itemCount} kalem`,
+      `💰 <b>Tahmini Tutar:</b> <b>${amountStr} TL</b>`,
+      `🎯 <b>Müşteri Tercihi:</b> ${preferenceLabel}`,
+      ``,
+      `🔗 <a href="${process.env.PUBLIC_SITE_URL || 'https://ermaymobilya.com'}/admin">Admin Paneli Talepleri Aç</a>`,
+    ].join('\n');
+
+    const ok = await this.sendMessage(message);
+    return {
+      success: ok,
+      message: ok ? 'Bildirim iletildi.' : 'Telegram bildirimi gönderilemedi.',
+    };
+  }
+
+  /**
+   * Alert admin when ERP sync fails permanently after retries.
+   */
+  async notifyErpSyncFailed(payload: { code: string; attempts: number; error: string }): Promise<void> {
+    const message = [
+      `🚨 <b>ERP SENKRONİZASYON ALARMI</b>`,
+      ``,
+      `🔖 <b>Talep No:</b> <code>${payload.code}</code>`,
+      `⚠️ <b>Hata Sayısı:</b> ${payload.attempts} deneme başarısız`,
+      `❌ <b>Son Hata:</b> <code>${payload.error}</code>`,
+      ``,
+      `⚠️ <i>Bu talep otomatik deneme sınırına ulaştı. Lütfen ERP bağlantısını ve stok kodlarını kontrol edip admin panelinden manuel tekrar gönderiniz.</i>`,
+    ].join('\n');
+
+    await this.sendMessage(message);
+  }
+
+  // Geriye dönük uyumluluk takma adı
+  async notifyNewOrder(order: any): Promise<{ success: boolean; message: string }> {
+    return this.notifyNewRequest({
+      code: order.orderNumber || order.code || 'WEB-TALEP',
+      subtotal: order.totalAmount || order.subtotal || 0,
+      preference: 'WHATSAPP',
+      city: order.city,
+      district: order.district,
+      itemCount: Array.isArray(order.items) ? order.items.length : 1,
+    });
   }
 }
 

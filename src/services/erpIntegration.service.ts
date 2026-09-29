@@ -64,6 +64,7 @@ export interface ErpOrderItemInput {
 }
 
 export interface ErpWebOrderInput {
+  externalRef?: string;
   orderNumber?: string;
   warehouse?: string;
   warehouseCode?: string;
@@ -106,7 +107,7 @@ export class ErpIntegrationService {
     return process.env.ERP_INTEGRATION_KEY || 'ermay_web_erp_secure_key_2026';
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
     const cleanBase = this.getErpApiUrl().replace(/\/$/, '');
     const cleanPath = path.replace(/^\//, '');
     const fullUrl = new URL(`${cleanBase}/${cleanPath}`);
@@ -124,6 +125,7 @@ export class ErpIntegrationService {
             'Content-Type': 'application/json',
             'x-integration-key': this.getErpKey(),
             ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+            ...(extraHeaders || {}),
           },
           timeout: 8000,
         },
@@ -162,6 +164,7 @@ export class ErpIntegrationService {
     });
   }
 
+
   private cachedErpItems: { items: ErpItem[]; timestamp: number } | null = null;
 
   /**
@@ -190,20 +193,60 @@ export class ErpIntegrationService {
 
   /**
    * Fetch combined catalog: ERP items joined with ErmayWeb Product publish/image state
+   * Graceful degradation: If ERP is offline/unreachable, falls back to webProducts catalog
    */
   async getCombinedCatalog(): Promise<CatalogItem[]> {
-    const erpItems = await this.fetchErpItems();
+    let erpItems: ErpItem[] = [];
+    try {
+      erpItems = await this.fetchErpItems();
+    } catch (err: unknown) {
+      console.warn(
+        '[ErpIntegrationService] ERP API çevrimdışı veya erişilemiyor, yerel ürün kataloğu fallback olarak kullanılıyor:',
+        err instanceof Error ? err.message : err
+      );
+    }
 
     const webProducts = await prisma.product.findMany({
       where: {
-        erpItemId: { not: null },
+        archivedAt: null,
       },
       include: {
         category: true,
       },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
 
-    const webProductMap = new Map<string, typeof webProducts[number]>();
+    if (erpItems.length === 0) {
+      // Fallback: Return existing DB products as catalog items
+      return webProducts.map((wp) => ({
+        erpId: wp.erpItemId,
+        erpCode: wp.erpItemCode || wp.slug,
+        erpName: wp.name,
+        erpSalePrice: Number(wp.price),
+        erpStock: wp.stock,
+        erpType: wp.category?.name || 'Mobilya',
+        erpImage: wp.image,
+        webProduct: {
+          id: wp.id,
+          name: wp.name,
+          slug: wp.slug,
+          price: Number(wp.price),
+          stock: wp.stock,
+          isPublished: wp.isPublished,
+          images: wp.images || [],
+          image: wp.image || '',
+          categoryId: wp.categoryId,
+          categoryName: wp.category?.name || '',
+          description: wp.description,
+          dimensions: wp.dimensions,
+          material: wp.material,
+        },
+      }));
+    }
+
+    const webProductMap = new Map<string, (typeof webProducts)[number]>();
     webProducts.forEach((wp) => {
       if (wp.erpItemId) webProductMap.set(wp.erpItemId, wp);
     });
@@ -329,11 +372,13 @@ export class ErpIntegrationService {
       });
     }
 
-    // Sync the primary image back to ERP if we have images
-    if (mainImage && mainImage.startsWith('/uploads')) {
+    // Sync the primary image back to ERP if we have images (Send ABSOLUTE URL)
+    if (mainImage) {
       try {
+        const baseUrl = (process.env.PUBLIC_SITE_URL || 'https://ermaymobilya.com').replace(/\/$/, '');
+        const fullImageUrl = mainImage.startsWith('http') ? mainImage : `${baseUrl}${mainImage.startsWith('/') ? '' : '/'}${mainImage}`;
         await this.request('PATCH', `/integration/items/${erpItemId}/image`, {
-          imageUrl: mainImage,
+          imageUrl: fullImageUrl,
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -350,6 +395,15 @@ export class ErpIntegrationService {
    * Submit web order directly to ERP sales pipeline
    */
   async submitWebOrderToErp(orderData: ErpWebOrderInput): Promise<{ saleId: string; saleCode: string; orderNumber: string; grandTotal: number | string; partyId: string }> {
+    const extraHeaders: Record<string, string> = {};
+    if (orderData.externalRef) {
+      extraHeaders['Idempotency-Key'] = orderData.externalRef;
+      extraHeaders['x-external-ref'] = orderData.externalRef;
+    }
+
+    // ERP validator uses strict whitelist. Remove non-whitelisted alias and header fields from body:
+    const { externalRef, orderNumber, customerName, customerPhone, customerEmail, addressLine, ...bodyPayload } = orderData;
+
     const res = await this.request<{
       success: boolean;
       saleId: string;
@@ -357,7 +411,7 @@ export class ErpIntegrationService {
       orderNumber?: string;
       grandTotal: number | string;
       partyId: string;
-    }>('POST', '/integration/orders', orderData);
+    }>('POST', '/integration/orders', bodyPayload, extraHeaders);
 
     return {
       saleId: res.saleId,
@@ -367,6 +421,7 @@ export class ErpIntegrationService {
       partyId: res.partyId,
     };
   }
+
 }
 
 export const erpIntegrationService = new ErpIntegrationService();

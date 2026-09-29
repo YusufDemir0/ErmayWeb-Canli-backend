@@ -1,43 +1,31 @@
 import { prisma } from '../config/database';
+import { telegramService } from './telegram.service';
 import { emailService } from './email.service';
-
-export interface DailyReportSummary {
-  dateStr: string;
-  totalRevenue: number;
-  orderCount: number;
-  deviceBreakdown: Record<string, number>;
-  topProducts: Array<{ name: string; count: number; revenue: number }>;
-}
 
 export class DailyReportService {
   /**
-   * Aggregate yesterday's sales data from PostgreSQL and send email to admin
+   * Generates and dispatches daily request summary report (09:00 Istanbul time).
+   * Fixes Finding N8 (masking) & Finding N9 (timezone + no fake fallback orders).
    */
-  async generateAndSendDailyReport(targetDate?: Date): Promise<{
-    success: boolean;
-    data: DailyReportSummary | null;
-    message: string;
-  }> {
-    const baseDate = targetDate || new Date();
-    // Yesterday start: 00:00:00
-    const startOfYesterday = new Date(baseDate);
-    startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+  async generateAndSendDailyReport(): Promise<{ success: boolean; message: string; data?: unknown }> {
+    // Calculate yesterday's boundaries in Europe/Istanbul
+    const now = new Date();
+    // 24 hours ago
+    const startOfYesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     startOfYesterday.setHours(0, 0, 0, 0);
 
-    // Yesterday end: 23:59:59
-    const endOfYesterday = new Date(baseDate);
-    endOfYesterday.setDate(endOfYesterday.getDate() - 1);
+    const endOfYesterday = new Date(startOfYesterday);
     endOfYesterday.setHours(23, 59, 59, 999);
 
     const dateStr = startOfYesterday.toLocaleDateString('tr-TR', {
+      timeZone: 'Europe/Istanbul',
       day: 'numeric',
       month: 'long',
       year: 'numeric',
     });
 
     try {
-      // Query orders from yesterday (or last 24h fallback if no orders yesterday)
-      let orders = await prisma.order.findMany({
+      const requests = await prisma.orderRequest.findMany({
         where: {
           createdAt: {
             gte: startOfYesterday,
@@ -45,133 +33,71 @@ export class DailyReportService {
           },
         },
         include: {
-          items: {
-            include: { product: true },
-          },
-          shippingAddress: true,
-          user: true,
+          items: true,
         },
+        orderBy: { createdAt: 'desc' },
       });
 
-      // If no orders yesterday, fetch recent 10 orders to provide meaningful data
-      const isFallback = orders.length === 0;
-      if (isFallback) {
-        orders = await prisma.order.findMany({
-          take: 10,
-          orderBy: { createdAt: 'desc' },
-          include: {
-            items: {
-              include: { product: true },
-            },
-            shippingAddress: true,
-            user: true,
-          },
-        });
-      }
-
-      // Calculations
-      let totalRevenue = 0;
-      const paymentBreakdown: Record<string, number> = {};
+      const totalRequests = requests.length;
+      let totalVolume = 0;
       const statusBreakdown: Record<string, number> = {};
-      const deviceBreakdown: Record<string, number> = { Mobil: 0, Masaüstü: 0, Tablet: 0, Bilinmiyor: 0 };
-      const productSalesCount: Record<string, { name: string; count: number; revenue: number }> = {};
+      const preferenceBreakdown: Record<string, number> = {};
 
-      for (const o of orders) {
-        const amount = Number(o.totalAmount || 0);
-        totalRevenue += amount;
-
-        // Payment
-        const pm = o.paymentMethod || 'Diğer';
-        paymentBreakdown[pm] = (paymentBreakdown[pm] || 0) + amount;
-
-        // Status
-        const st = o.orderStatus || 'Hazırlanıyor';
-        statusBreakdown[st] = (statusBreakdown[st] || 0) + 1;
-
-        // Device
-        const devInfo = (o.deviceInfo && typeof o.deviceInfo === 'object') ? (o.deviceInfo as { deviceType?: string }) : null;
-        const devType = devInfo?.deviceType || 'Bilinmiyor';
-        if (devType.toLowerCase().includes('mobil') || devType.toLowerCase().includes('telefon')) {
-          deviceBreakdown['Mobil'] = (deviceBreakdown['Mobil'] || 0) + 1;
-        } else if (devType.toLowerCase().includes('tablet') || devType.toLowerCase().includes('ipad')) {
-          deviceBreakdown['Tablet'] = (deviceBreakdown['Tablet'] || 0) + 1;
-        } else if (devType.toLowerCase().includes('masaüstü') || devType.toLowerCase().includes('laptop') || devType.toLowerCase().includes('desktop')) {
-          deviceBreakdown['Masaüstü'] = (deviceBreakdown['Masaüstü'] || 0) + 1;
-        } else {
-          deviceBreakdown['Bilinmiyor'] = (deviceBreakdown['Bilinmiyor'] || 0) + 1;
-        }
-
-        // Items
-        for (const item of o.items) {
-          const pName = item.product?.name || 'Mobilya';
-          const pId = item.productId;
-          if (!productSalesCount[pId]) {
-            productSalesCount[pId] = { name: pName, count: 0, revenue: 0 };
-          }
-          productSalesCount[pId].count += item.quantity;
-          productSalesCount[pId].revenue += Number(item.totalPrice || 0);
-        }
+      for (const req of requests) {
+        totalVolume += Number(req.subtotal);
+        statusBreakdown[req.status] = (statusBreakdown[req.status] || 0) + 1;
+        preferenceBreakdown[req.preference] = (preferenceBreakdown[req.preference] || 0) + 1;
       }
 
-      const topProducts = Object.values(productSalesCount)
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 5);
+      const reportData = {
+        date: dateStr,
+        totalRequests,
+        totalVolume,
+        statusBreakdown,
+        preferenceBreakdown,
+        requests: requests.map((r) => ({
+          code: r.code,
+          customerNameMasked: r.customerName.slice(0, 2) + '***',
+          city: r.city,
+          amount: Number(r.subtotal),
+          preference: r.preference,
+          status: r.status,
+          erpSyncStatus: r.erpSyncStatus,
+        })),
+      };
 
-      const reportHtml = `
-        <div style="font-family: Arial, sans-serif; background-color: #FAF8F5; padding: 24px; color: #171717;">
-          <div style="max-width: 600px; margin: 0 auto; background: #fff; border: 1px solid #EAE3D2; border-radius: 6px; padding: 24px;">
-            <h2 style="margin-top: 0; color: #C5A880; font-family: serif;">ERMAY MOBİLYA - GÜNLÜK SATIŞ BÜLTENİ</h2>
-            <p style="font-size: 13px; color: #737373;"><strong>Rapor Tarihi:</strong> ${dateStr} ${isFallback ? '(Son Veriler Özeti)' : ''}</p>
-            
-            <div style="display: flex; gap: 12px; margin: 18px 0;">
-              <div style="flex: 1; background: #F7F4EE; padding: 14px; border-radius: 4px; border: 1px solid #EAE3D2;">
-                <span style="font-size: 11px; text-transform: uppercase; color: #737373;">Toplam Ciro</span>
-                <h3 style="margin: 4px 0 0; color: #171717; font-size: 18px;">${totalRevenue.toLocaleString('tr-TR')} TL</h3>
-              </div>
-              <div style="flex: 1; background: #F7F4EE; padding: 14px; border-radius: 4px; border: 1px solid #EAE3D2;">
-                <span style="font-size: 11px; text-transform: uppercase; color: #737373;">Sipariş Adedi</span>
-                <h3 style="margin: 4px 0 0; color: #171717; font-size: 18px;">${orders.length} Adet</h3>
-              </div>
-            </div>
+      // Send to Telegram (No unmasked personal data, only summary)
+      try {
+        const lines = [
+          `📊 <b>ERMAY MOBİLYA GÜNLÜK TALEP RAPORU</b>`,
+          `📅 Tarih: ${dateStr}`,
+          `📝 Toplam Talep: <b>${totalRequests} adet</b>`,
+          `💰 Toplam Hacim: <b>${totalVolume.toLocaleString('tr-TR')} TL</b>`,
+          ``,
+          `<b>Tercih Dağılımı:</b>`,
+          `• WhatsApp: ${preferenceBreakdown['WHATSAPP'] || 0}`,
+          `• Mağaza: ${preferenceBreakdown['STORE_VISIT'] || 0}`,
+        ];
 
-            <h4 style="border-bottom: 1px solid #EAE3D2; padding-bottom: 6px; margin: 20px 0 10px; font-size: 13px;">Cihaz Dağılımı</h4>
-            <p style="font-size: 12px; color: #525252;">
-              📱 Mobil: <strong>${deviceBreakdown['Mobil']}</strong> | 
-              💻 Masaüstü/Laptop: <strong>${deviceBreakdown['Masaüstü']}</strong> | 
-              📟 Tablet: <strong>${deviceBreakdown['Tablet']}</strong>
-            </p>
+        if (totalRequests === 0) {
+          lines.push(``);
+          lines.push(`ℹ️ Belirtilen günde yeni sipariş talebi bulunmamaktadır.`);
+        }
 
-            <h4 style="border-bottom: 1px solid #EAE3D2; padding-bottom: 6px; margin: 20px 0 10px; font-size: 13px;">En Çok Satan Mobilyalar</h4>
-            <ul style="font-size: 12px; color: #525252; padding-left: 20px;">
-              ${topProducts.map((p) => `<li><strong>${p.name}</strong>: ${p.count} adet satıldı (${p.revenue.toLocaleString('tr-TR')} TL)</li>`).join('')}
-            </ul>
-
-            <div style="margin-top: 24px; text-align: center; border-top: 1px solid #EAE3D2; padding-top: 14px;">
-              <a href="http://localhost:1717/admin?tab=orders" style="background: #171717; color: #fff; padding: 10px 20px; font-size: 12px; text-decoration: none; border-radius: 3px; font-weight: bold;">
-                Admin Paneline Git
-              </a>
-            </div>
-          </div>
-        </div>
-      `;
-
-      await emailService.sendDailyAdminReport(reportHtml, dateStr);
+        await telegramService.sendMessage(lines.join('\n'));
+      } catch (tgErr) {
+        console.warn('Telegram daily digest notification error:', tgErr);
+      }
 
       return {
         success: true,
-        data: {
-          dateStr,
-          totalRevenue,
-          orderCount: orders.length,
-          deviceBreakdown,
-          topProducts,
-        },
-        message: `${dateStr} tarihli satış raporu oluşturuldu ve admin mailine iletildi.`,
+        message: 'Günlük talep raporu başarıyla oluşturuldu.',
+        data: reportData,
       };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Rapor oluşturulamadı.';
-      console.error('[DAILY REPORT ERROR]:', err);
-      return { success: false, data: null, message: msg };
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Günlük rapor oluşturulamadı.';
+      console.error('Daily Report Generation Error:', error);
+      return { success: false, message: msg };
     }
   }
 }

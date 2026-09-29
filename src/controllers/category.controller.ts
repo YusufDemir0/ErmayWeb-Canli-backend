@@ -25,6 +25,25 @@ export async function getCategories(req: Request, res: Response): Promise<void> 
   }
 }
 
+export async function getCategoryBySlug(req: Request, res: Response): Promise<void> {
+  try {
+    const slug = req.params.slug as string;
+    const category = await prisma.category.findUnique({
+      where: { slug },
+      include: { children: true },
+    });
+
+    if (!category) {
+      res.status(404).json({ success: false, message: 'Kategori bulunamadı.' });
+      return;
+    }
+
+    res.status(200).json({ success: true, category });
+  } catch (error: unknown) {
+    res.status(500).json({ success: false, message: 'Kategori bilgisi alınamadı.' });
+  }
+}
+
 export async function createCategory(req: Request, res: Response): Promise<void> {
   try {
     const { name, description, image, parentId } = req.body;
@@ -59,6 +78,12 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
     const id = req.params.id as string;
     const { name, description, image, parentId } = req.body;
 
+    const existing = await prisma.category.findUnique({ where: { id } });
+    if (!existing) {
+      res.status(404).json({ success: false, message: 'Güncellenecek kategori bulunamadı.' });
+      return;
+    }
+
     const dataToUpdate: Prisma.CategoryUpdateInput = {};
     if (name) {
       dataToUpdate.name = name;
@@ -86,6 +111,18 @@ export async function deleteCategory(req: Request, res: Response): Promise<void>
   try {
     const id = req.params.id as string;
     const { reassignTo } = req.query;
+
+    const existingCategory = await prisma.category.findUnique({
+      where: { id },
+    });
+
+    if (!existingCategory) {
+      res.status(200).json({
+        success: true,
+        message: 'Kategori zaten silinmiş veya bulunamadı.',
+      });
+      return;
+    }
 
     const productCount = await prisma.product.count({ where: { categoryId: id } });
     if (productCount > 0) {
@@ -119,14 +156,29 @@ export async function deleteCategory(req: Request, res: Response): Promise<void>
       });
     }
 
-    await prisma.category.delete({ where: { id } });
+    try {
+      await prisma.category.delete({ where: { id } });
+    } catch (delError: unknown) {
+      if (
+        delError instanceof Prisma.PrismaClientKnownRequestError &&
+        delError.code === 'P2025'
+      ) {
+        res.status(200).json({
+          success: true,
+          message: 'Kategori zaten silinmiş.',
+        });
+        return;
+      }
+      throw delError;
+    }
+
     await invalidateCachePattern('categories:*');
     await invalidateCachePattern('products:*');
 
     res.status(200).json({
       success: true,
       message: productCount > 0
-        ? `Kategori silindi. İçindeki ${productCount} adet ürün diğer kategoriye aktarıldı.`
+        ? `Kategori silindi. İçindeki ${productCount} adet ürün "${existingCategory.name}" kategorisinden aktarıldı.`
         : 'Kategori başarıyla silindi.',
     });
   } catch (error: unknown) {
