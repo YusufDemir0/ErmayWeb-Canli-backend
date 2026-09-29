@@ -154,11 +154,21 @@ describe('Live E2E API and Route Integration Verification', () => {
   });
 
   // 7. Frontend Routing Verification
-  test('Frontend root URL (/) performs HTTP 307 temporary redirect to /kategori/aksesuar-ve-diger', async () => {
+  test('Frontend root URL (/) renders default category directly with HTTP 200 OK without redirecting', async () => {
     const res = await fetch(`${FRONTEND_URL}/`, { redirect: 'manual' });
-    assert.equal(res.status, 307);
-    const location = res.headers.get('location');
-    assert.equal(location, '/kategori/aksesuar-ve-diger');
+    assert.equal(res.status, 200, 'Root URL must render directly with HTTP 200 instead of 307 redirect');
+    const html = await res.text();
+    assert.ok(html.toLowerCase().includes('aksesuar') || html.includes('categorySlug'), 'Root URL must contain default category page content');
+  });
+
+  test('Frontend /kategori returns HTTP 200 OK as base products page', async () => {
+    const res = await fetch(`${FRONTEND_URL}/kategori`, { redirect: 'manual' });
+    assert.equal(res.status, 200, '/kategori must render base catalog directly without redirecting');
+  });
+
+  test('Frontend /katalog returns HTTP 200 OK', async () => {
+    const res = await fetch(`${FRONTEND_URL}/katalog`);
+    assert.equal(res.status, 200);
   });
 
   test('Frontend /bayiler returns HTTP 200 OK and renders Turkey map container', async () => {
