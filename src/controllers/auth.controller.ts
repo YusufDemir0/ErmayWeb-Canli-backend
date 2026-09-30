@@ -26,7 +26,6 @@ export async function login(req: Request, res: Response): Promise<void> {
         OR: [
           { email: rawIdentifier },
           { email: `${rawIdentifier}@ermaymobilya.com` },
-          { name: { equals: rawIdentifier, mode: 'insensitive' } },
         ],
       },
     });

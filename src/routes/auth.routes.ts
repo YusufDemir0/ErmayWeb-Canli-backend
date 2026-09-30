@@ -13,14 +13,27 @@ import {
   addCard,
   deleteCard,
 } from '../controllers/auth.controller';
+import rateLimit from 'express-rate-limit';
 import { authenticateToken } from '../middlewares/auth.middleware';
 import { validateRequest } from '../middlewares/validate.middleware';
 import { LoginSchema, RegisterSchema } from '../validations';
 
 const router = Router();
 
+export const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Max 10 attempts
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: {
+    success: false,
+    message: 'Çok fazla başarısız giriş denemesi. Lütfen 15 dakika sonra tekrar deneyiniz.',
+  },
+});
+
 router.post('/register', validateRequest(RegisterSchema), register);
-router.post('/login', validateRequest(LoginSchema), login);
+router.post('/login', loginLimiter, validateRequest(LoginSchema), login);
 router.post('/logout', logout);
 router.get('/profile', authenticateToken, getProfile);
 router.post('/change-password', authenticateToken, changePassword);
