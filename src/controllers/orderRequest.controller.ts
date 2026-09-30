@@ -62,10 +62,15 @@ export async function quoteCart(req: Request, res: Response): Promise<void> {
     let totalUnits = 0;
     const quotedItems = [];
 
+    // N+1 Sorgu Optimizasyonu: Tek sorguda tüm ürünleri çek
+    const productIds = items.map((i) => i.productId);
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+    });
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
     for (const item of items) {
-      const product = await prisma.product.findUnique({
-        where: { id: item.productId },
-      });
+      const product = productMap.get(item.productId);
 
       if (!product || !product.isPublished || product.archivedAt) {
         res.status(400).json({
@@ -183,7 +188,13 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
       }
     }
 
-    // 5. Ürünleri DB'den doğrula ve güncel fiyatları dondur (Snapshot)
+    // 5. Ürünleri DB'den tek sorguda doğrula ve dondur (Snapshot - N+1 Fix)
+    const productIds = data.items.map((i) => i.productId);
+    const dbProducts = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+    });
+    const dbProductMap = new Map(dbProducts.map((p) => [p.id, p]));
+
     let totalSubtotal = 0;
     const resolvedItems: Array<{
       productId: string;
@@ -197,9 +208,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
     }> = [];
 
     for (const item of data.items) {
-      const dbProduct = await prisma.product.findUnique({
-        where: { id: item.productId },
-      });
+      const dbProduct = dbProductMap.get(item.productId);
 
       if (!dbProduct || !dbProduct.isPublished || dbProduct.archivedAt) {
         res.status(400).json({
@@ -236,8 +245,11 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
     const publicToken = crypto.randomBytes(16).toString('hex');
     const targetPreference = data.preference === 'STORE_VISIT' ? RequestPreference.STORE_VISIT : RequestPreference.WHATSAPP;
 
-    // 7. Atomik Veritabanı Kaydı
+    // 7. Atomik Veritabanı Kaydı (PostgreSQL Advisory Lock ile korumalı)
     const createdRequest = await prisma.$transaction(async (tx) => {
+      // Transaction-level advisory lock (Yarış koşullarına karşı koruma)
+      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(987654321)');
+
       const newRequest = await tx.orderRequest.create({
         data: {
           code,

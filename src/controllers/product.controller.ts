@@ -92,10 +92,10 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
         where.AND = andFilters;
       }
 
-      let orderBy: Prisma.ProductOrderByWithRelationInput = { createdAt: 'desc' };
+      let orderBy: Prisma.ProductOrderByWithRelationInput | Prisma.ProductOrderByWithRelationInput[] = { createdAt: 'desc' };
       if (sort === 'price_asc') orderBy = { price: 'asc' };
       if (sort === 'price_desc') orderBy = { price: 'desc' };
-      if (sort === 'popular') orderBy = { createdAt: 'desc' };
+      if (sort === 'popular') orderBy = [{ salesCount: 'desc' }, { createdAt: 'desc' }];
 
       const [products, totalCount] = await Promise.all([
         prisma.product.findMany({
@@ -112,6 +112,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
             originalPrice: true,
             stock: true,
             inStock: true,
+            salesCount: true,
             image: true,
             images: true,
             features: true,
@@ -142,6 +143,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
         price: Number(p.price),
         originalPrice: p.originalPrice ? Number(p.originalPrice) : null,
         vatRate: p.vatRate ? Number(p.vatRate) : 0.20,
+        salesCount: p.salesCount ?? 0,
       }));
 
       return {
