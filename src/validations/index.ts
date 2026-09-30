@@ -59,13 +59,25 @@ export const BulkLinkSchema = z.object({
 
 export const CreateCategorySchema = z.object({
   name: z.string().min(2, 'Kategori adı en az 2 karakter olmalıdır.'),
-  slug: z.string().min(2, 'Kategori slug en az 2 karakter olmalıdır.'),
+  slug: z.string().min(2).optional(),
   description: z.string().optional().nullable(),
   image: z.string().optional().nullable(),
+  parentId: z.string().optional().nullable(),
+  sortOrder: z.number().int().optional(),
   displayOrder: z.number().int().optional(),
 });
 
 export const UpdateCategorySchema = CreateCategorySchema.partial();
+
+export const ReorderCategoriesSchema = z.object({
+  items: z.array(
+    z.object({
+      id: z.string().min(1, 'Kategori ID zorunludur.'),
+      parentId: z.string().nullable().optional(),
+      sortOrder: z.number().int(),
+    })
+  ).min(1, 'En az bir kategori öğesi gönderilmelidir.'),
+});
 
 export const UpdateCmsBlockSchema = z.object({
   content: z.union([z.record(z.unknown()), z.array(z.unknown()), z.string(), z.number(), z.boolean()]),

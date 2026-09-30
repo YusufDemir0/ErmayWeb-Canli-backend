@@ -14,8 +14,12 @@ export async function getCategories(req: Request, res: Response): Promise<void> 
       CATEGORIES_CACHE_TTL,
       async () => {
         return prisma.category.findMany({
-          orderBy: { name: 'asc' },
-          include: { children: true },
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+          include: {
+            children: {
+              orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+            },
+          },
         });
       }
     );
@@ -30,7 +34,11 @@ export async function getCategoryBySlug(req: Request, res: Response): Promise<vo
     const slug = req.params.slug as string;
     const category = await prisma.category.findUnique({
       where: { slug },
-      include: { children: true },
+      include: {
+        children: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        },
+      },
     });
 
     if (!category) {
@@ -46,13 +54,23 @@ export async function getCategoryBySlug(req: Request, res: Response): Promise<vo
 
 export async function createCategory(req: Request, res: Response): Promise<void> {
   try {
-    const { name, description, image, parentId } = req.body;
+    const { name, description, image, parentId, sortOrder, slug: manualSlug } = req.body;
     if (!name) {
       res.status(400).json({ success: false, message: 'Kategori adı zorunludur.' });
       return;
     }
 
-    const slug = slugifyTurkish(name);
+    const slug = manualSlug ? slugifyTurkish(manualSlug) : slugifyTurkish(name);
+
+    // Eğer sortOrder verilmemişse o seviyedeki en son kategori + 1 yap
+    let finalSortOrder = typeof sortOrder === 'number' ? sortOrder : 0;
+    if (typeof sortOrder !== 'number') {
+      const lastCat = await prisma.category.findFirst({
+        where: { parentId: parentId || null },
+        orderBy: { sortOrder: 'desc' },
+      });
+      finalSortOrder = lastCat ? lastCat.sortOrder + 1 : 0;
+    }
 
     const category = await prisma.category.create({
       data: {
@@ -61,6 +79,7 @@ export async function createCategory(req: Request, res: Response): Promise<void>
         description,
         image,
         parentId: parentId || null,
+        sortOrder: finalSortOrder,
       },
     });
 
@@ -76,7 +95,7 @@ export async function createCategory(req: Request, res: Response): Promise<void>
 export async function updateCategory(req: Request, res: Response): Promise<void> {
   try {
     const id = req.params.id as string;
-    const { name, description, image, parentId } = req.body;
+    const { name, description, image, parentId, sortOrder, slug: manualSlug } = req.body;
 
     const existing = await prisma.category.findUnique({ where: { id } });
     if (!existing) {
@@ -84,14 +103,25 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
       return;
     }
 
+    // Döngüsel ebeveynlik kontrolü
+    if (parentId && parentId === id) {
+      res.status(400).json({ success: false, message: 'Bir kategori kendi kendisinin alt kategorisi olamaz.' });
+      return;
+    }
+
     const dataToUpdate: Prisma.CategoryUpdateInput = {};
     if (name) {
       dataToUpdate.name = name;
-      dataToUpdate.slug = slugifyTurkish(name);
+      dataToUpdate.slug = manualSlug ? slugifyTurkish(manualSlug) : slugifyTurkish(name);
     }
     if (description !== undefined) dataToUpdate.description = description;
     if (image !== undefined) dataToUpdate.image = image;
-    if (parentId !== undefined) dataToUpdate.parent = parentId ? { connect: { id: parentId } } : { disconnect: true };
+    if (parentId !== undefined) {
+      dataToUpdate.parent = parentId ? { connect: { id: parentId } } : { disconnect: true };
+    }
+    if (typeof sortOrder === 'number') {
+      dataToUpdate.sortOrder = sortOrder;
+    }
 
     const category = await prisma.category.update({
       where: { id },
@@ -103,6 +133,63 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
     res.status(200).json({ success: true, message: 'Kategori güncellendi.', category });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Kategori güncellenemedi.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+export async function reorderCategories(req: Request, res: Response): Promise<void> {
+  try {
+    const { items } = req.body as {
+      items: Array<{ id: string; parentId?: string | null; sortOrder: number }>;
+    };
+
+    if (!Array.isArray(items) || items.length === 0) {
+      res.status(400).json({ success: false, message: 'Geçerli bir kategori sıralama listesi gönderilmelidir.' });
+      return;
+    }
+
+    // Döngüsel ebeveyn kontrolü (id === parentId)
+    for (const item of items) {
+      if (item.parentId && item.id === item.parentId) {
+        res.status(400).json({
+          success: false,
+          message: `Kategori (${item.id}) kendi kendisinin alt kategorisi olamaz.`,
+        });
+        return;
+      }
+    }
+
+    // Toplu güncelleme işlemi (Transaction)
+    await prisma.$transaction(
+      items.map((item) =>
+        prisma.category.update({
+          where: { id: item.id },
+          data: {
+            parentId: item.parentId || null,
+            sortOrder: item.sortOrder,
+          },
+        })
+      )
+    );
+
+    await invalidateCachePattern('categories:*');
+
+    const updatedCategories = await prisma.category.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+      include: {
+        children: {
+          orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
+        },
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Kategori hiyerarşisi ve sıralaması başarıyla güncellendi.',
+      categories: updatedCategories,
+    });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Sıralama güncellenemedi.';
     res.status(500).json({ success: false, message: msg });
   }
 }
