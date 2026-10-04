@@ -12,6 +12,15 @@ export interface RequestNotificationPayload {
   itemCount: number;
 }
 
+function escapeHtml(text?: string | null): string {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export class TelegramService {
   private getBotCredentials(): { botToken: string | null; chatId: string | null } {
     const botToken = process.env.TELEGRAM_BOT_TOKEN || null;
@@ -91,16 +100,19 @@ export class TelegramService {
       return { success: false, message: 'Telegram Bot yapılandırması eksik (isteğe bağlı).' };
     }
 
-    const locationStr = [req.city, req.district].filter(Boolean).join(' / ') || 'Belirtilmedi';
+    const cleanCity = escapeHtml(req.city);
+    const cleanDistrict = escapeHtml(req.district);
+    const cleanCode = escapeHtml(req.code);
+    const locationStr = [cleanCity, cleanDistrict].filter(Boolean).join(' / ') || 'Belirtilmedi';
     const preferenceLabel = req.preference === 'WHATSAPP' ? '🟢 WhatsApp Görüşmesi' : '🔵 Mağaza Ziyareti';
-    const amountStr = typeof req.subtotal === 'number' ? req.subtotal.toLocaleString('tr-TR') : req.subtotal;
+    const amountStr = typeof req.subtotal === 'number' ? req.subtotal.toLocaleString('tr-TR') : escapeHtml(String(req.subtotal));
 
     const message = [
       `🛋️ <b>YENİ SİPARİŞ TALEBİ</b>`,
       ``,
-      `🔖 <b>Talep No:</b> <code>${req.code}</code>`,
+      `🔖 <b>Talep No:</b> <code>${cleanCode}</code>`,
       `📍 <b>Bölge:</b> ${locationStr}`,
-      `📦 <b>Ürün Adedi:</b> ${req.itemCount} kalem`,
+      `📦 <b>Ürün Çeşidi:</b> ${req.itemCount} kalem`,
       `💰 <b>Tahmini Tutar:</b> <b>${amountStr} TL</b>`,
       `🎯 <b>Müşteri Tercihi:</b> ${preferenceLabel}`,
       ``,
@@ -115,15 +127,55 @@ export class TelegramService {
   }
 
   /**
+   * Masked notification for a new contact form message (only the subject, no PII).
+   */
+  async notifyNewContactMessage(payload: { subject: string }): Promise<void> {
+    const message = [
+      `✉️ <b>YENİ İLETİŞİM MESAJI</b>`,
+      ``,
+      `📝 <b>Konu:</b> ${escapeHtml(payload.subject.slice(0, 150))}`,
+      ``,
+      `🔗 <a href="${process.env.PUBLIC_SITE_URL || 'https://ermaymobilya.com'}/admin">Admin Paneli Mesajları Aç</a>`,
+    ].join('\n');
+
+    await this.sendMessage(message);
+  }
+
+  /**
+   * Alert admin when the 15-minute catalog sync is aborted by the mass-unpublish guard.
+   */
+  async notifyCatalogSyncAborted(payload: { reason: string }): Promise<void> {
+    const message = [
+      `🛑 <b>KATALOG SENKRONİZASYONU DURDURULDU</b>`,
+      ``,
+      `⚠️ ${escapeHtml(payload.reason.slice(0, 300))}`,
+      ``,
+      `<i>Web kataloğunda hiçbir ürün değiştirilmedi. Lütfen ERP /integration/items yanıtını kontrol ediniz.</i>`,
+    ].join('\n');
+
+    await this.sendMessage(message);
+  }
+
+  /**
    * Alert admin when ERP sync fails permanently after retries.
    */
   async notifyErpSyncFailed(payload: { code: string; attempts: number; error: string }): Promise<void> {
+    const rawError = payload.error || 'Bilinmeyen Entegrasyon Hatası';
+    const sanitizedError = rawError
+      .replace(/https?:\/\/[^\s]+/gi, '[URL_REDACTED]')
+      .replace(/postgres(ql)?:\/\/[^\s]+/gi, '[DB_REDACTED]')
+      .replace(/(key|token|secret|password|auth)=([^\s&]+)/gi, '$1=[REDACTED]')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .slice(0, 200);
+
     const message = [
       `🚨 <b>ERP SENKRONİZASYON ALARMI</b>`,
       ``,
       `🔖 <b>Talep No:</b> <code>${payload.code}</code>`,
       `⚠️ <b>Hata Sayısı:</b> ${payload.attempts} deneme başarısız`,
-      `❌ <b>Son Hata:</b> <code>${payload.error}</code>`,
+      `❌ <b>Son Hata:</b> <code>${sanitizedError}</code>`,
       ``,
       `⚠️ <i>Bu talep otomatik deneme sınırına ulaştı. Lütfen ERP bağlantısını ve stok kodlarını kontrol edip admin panelinden manuel tekrar gönderiniz.</i>`,
     ].join('\n');

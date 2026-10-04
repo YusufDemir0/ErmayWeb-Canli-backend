@@ -132,6 +132,7 @@ model Product {
   @@index([isPublished, categoryId])
   @@index([isPublished, createdAt(sort: Desc)])
   @@index([inStock, isPublished])
+  @@index([isPublished, price])
   @@map("products")
 }
 

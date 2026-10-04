@@ -5,12 +5,12 @@ import {
   updateStore,
   deleteStore,
 } from '../controllers/store.controller';
-import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { authenticateToken, authorizeRoles, authenticateOptionalToken } from '../middlewares/auth.middleware';
 
 const router = Router();
 
 // Public store listing
-router.get('/', getStores);
+router.get('/', authenticateOptionalToken, getStores);
 
 // Protected Admin store management
 router.post('/', authenticateToken, authorizeRoles('ADMIN'), createStore);

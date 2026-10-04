@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { prisma } from '../config/database';
 import { erpIntegrationService } from '../services/erpIntegration.service';
 import { runCatalogSync } from '../jobs/erpCatalogSync.job';
+import { invalidateCachePattern } from '../utils/cache';
 import { RequestStatus, PaymentChannel } from '@prisma/client';
 
 export async function getErpCatalog(_req: Request, res: Response): Promise<void> {
@@ -30,6 +31,15 @@ export async function triggerManualCatalogSync(_req: Request, res: Response): Pr
       res.status(409).json({
         success: false,
         message: 'Katalog senkronizasyonu şu anda başka bir işlem tarafından yürütülüyor. Lütfen birkaç saniye sonra tekrar deneyin.',
+      });
+      return;
+    }
+
+    if (report.aborted) {
+      res.status(502).json({
+        success: false,
+        message: `Katalog senkronizasyonu durduruldu, web kataloğunda değişiklik yapılmadı. ${report.abortReason || ''}`.trim(),
+        report,
       });
       return;
     }
@@ -104,11 +114,24 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
       return;
     }
 
-    const { saleCode, saleId, externalRef } = req.body;
+    const { saleCode, saleId, externalRef, status } = req.body;
 
     if (!saleCode && !saleId && !externalRef) {
       res.status(400).json({ success: false, message: 'saleCode, saleId veya externalRef eksik.' });
       return;
+    }
+
+    // S-17: Validate webhook status if provided
+    if (status) {
+      const normalizedStatus = String(status).toUpperCase();
+      const approvedStatuses = ['APPROVED', 'PAID', 'COMPLETED', 'SUCCESS'];
+      if (!approvedStatuses.includes(normalizedStatus)) {
+        res.status(200).json({
+          success: true,
+          message: `ERP webhook durumu (${status}) onaylı durumlar arasında olmadığından talep durumu güncellenmedi.`,
+        });
+        return;
+      }
     }
 
     // Find the request in ErmayWeb database
@@ -147,6 +170,16 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
               erpSyncStatus: 'SYNCED',
             },
           });
+
+          // V-14: Increment product salesCount
+          for (const item of orderRequest.items) {
+            if (item.productId) {
+              await tx.product.update({
+                where: { id: item.productId },
+                data: { salesCount: { increment: item.quantity } },
+              }).catch(() => {});
+            }
+          }
         }
 
         await tx.orderRequestEvent.create({
@@ -159,6 +192,10 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
           },
         });
       });
+
+      if (canTransition) {
+        await invalidateCachePattern('products:*').catch(() => {});
+      }
     }
 
     res.status(200).json({

@@ -1,8 +1,14 @@
 import process from 'node:process';
 import { PrismaClient, AdminRole } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 
 const prisma = new PrismaClient();
+
+// Seed varsayılan olarak yalnızca EKSİK kayıtları oluşturur; admin panelinden düzenlenmiş CMS içeriği, kategori
+// adları/sıralaması ve ürün fiyatları yeniden seed çalıştırıldığında ezilmez. Bilerek sıfırlamak için:
+// SEED_OVERWRITE_CONTENT=true
+const OVERWRITE_CONTENT = process.env.SEED_OVERWRITE_CONTENT === 'true';
 
 async function main() {
   console.log('🌱 ErmayWeb (v3.0) Temiz Baseline Tohumlama Başlatılıyor...');
@@ -15,34 +21,66 @@ async function main() {
   }
 
   const adminEmail = (process.env.SEED_ADMIN_EMAIL || 'admin@ermaymobilya.com').trim().toLowerCase();
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD || 'ErmayAdmin2026!Secure';
+  // 1. Süper Admin Kullanıcısı
+  // Mevcut admin varsa şifresine dokunulmaz: seed'i tekrar çalıştırmak canlı şifreyi sıfırlamamalı.
+  // Bilerek sıfırlamak için SEED_RESET_ADMIN_PASSWORD=true verilir. Şifre yalnızca gerçekten kullanılacaksa
+  // (yeni admin veya bilinçli sıfırlama) istenir; aksi halde yalnızca içerik eklemek için seed çalıştırılabilir.
+  const existingAdmin = await prisma.adminUser.findUnique({ where: { email: adminEmail } });
+  const resetPassword = !existingAdmin || process.env.SEED_RESET_ADMIN_PASSWORD === 'true';
 
-  if (adminPassword.length < 12) {
-    console.error('❌ HATA: SEED_ADMIN_PASSWORD en az 12 karakter uzunluğunda olmalıdır!');
-    process.exit(1);
+  // Dokümantasyonda / eski .env.example dosyalarında yayımlanmış şifreler asla kabul edilmez.
+  const PUBLISHED_PASSWORDS = ['ErmayAdmin2026!Secure', 'change-me-to-a-strong-password'];
+  let adminPassword = (process.env.SEED_ADMIN_PASSWORD || '').trim();
+  let generatedPassword = false;
+  let passwordHash: string | null = null;
+
+  if (resetPassword) {
+    if (!adminPassword || PUBLISHED_PASSWORDS.includes(adminPassword)) {
+      if (process.env.NODE_ENV === 'production') {
+        console.error('❌ HATA: Üretimde SEED_ADMIN_PASSWORD tanımlanmalı ve örnek/yayımlanmış bir şifre olmamalıdır.');
+        console.error('Örnek: SEED_ADMIN_PASSWORD="$(openssl rand -base64 24)"');
+        process.exit(1);
+      }
+      adminPassword = crypto.randomBytes(18).toString('base64url');
+      generatedPassword = true;
+    }
+
+    if (adminPassword.length < 12) {
+      console.error('❌ HATA: SEED_ADMIN_PASSWORD en az 12 karakter uzunluğunda olmalıdır!');
+      process.exit(1);
+    }
+
+    passwordHash = await bcrypt.hash(adminPassword, 12);
   }
 
-  // 1. Süper Admin Kullanıcısı
-  const passwordHash = await bcrypt.hash(adminPassword, 12);
-
-  const adminUser = await prisma.adminUser.upsert({
-    where: { email: adminEmail },
-    update: {
-      passwordHash,
-      name: 'Ermay Sistem Yöneticisi',
-      role: AdminRole.ADMIN,
-      isActive: true,
-    },
-    create: {
-      email: adminEmail,
-      passwordHash,
-      name: 'Ermay Sistem Yöneticisi',
-      role: AdminRole.ADMIN,
-      isActive: true,
-    },
-  });
+  // upsert yerine açık dallar: Prisma upsert'te `create` alanlarını kayıt mevcutken de doğrular, bu yüzden
+  // şifre üretilmediğinde (mevcut admin) passwordHash=null hatası verirdi.
+  const adminUser = existingAdmin
+    ? await prisma.adminUser.update({
+        where: { id: existingAdmin.id },
+        data: {
+          ...(passwordHash ? { passwordHash } : {}),
+          name: 'Ermay Sistem Yöneticisi',
+          role: AdminRole.ADMIN,
+          isActive: true,
+        },
+      })
+    : await prisma.adminUser.create({
+        data: {
+          email: adminEmail,
+          passwordHash: passwordHash!, // admin yokken resetPassword=true olduğundan hash her zaman üretilmiştir
+          name: 'Ermay Sistem Yöneticisi',
+          role: AdminRole.ADMIN,
+          isActive: true,
+        },
+      });
 
   console.log(`✅ Süper Admin kullanıcısı hazır: ${adminUser.email}`);
+  if (!resetPassword) {
+    console.log('ℹ️ Mevcut admin şifresi korundu (sıfırlamak için SEED_RESET_ADMIN_PASSWORD=true).');
+  } else if (generatedPassword) {
+    console.log(`🔑 Geliştirme ortamı için rastgele admin şifresi üretildi: ${adminPassword}`);
+  }
 
   // 2. Temel CMS Blokları
   const defaultBlocks = [
@@ -70,8 +108,8 @@ async function main() {
       content: {
         warrantyText: 'Tüm standart seri fabrika imalatı mobilyalarımız 2 yıl üretici ve malzeme garantisi altındadır.',
         deliveryText: 'İstanbul içi teslimat ve kurulum Ermay kendi sevkiyat ve montaj ekibi tarafından sağlanır. Tüm Türkiye’ye sigortalı nakliye mevcuttur.',
-        returnText: 'Standart seri ürünlerimizde teslimat tarihinden itibaren 14 gün içinde koşulsuz iade ve değişim hakkı geçerlidir.',
-        officialIban: 'TR00 0000 0000 0000 0000 0000 00 (Ermay Mobilya San. Tic. Ltd. Şti.)',
+        returnText: 'WhatsApp / telefon üzerinden uzaktan tamamlanan satışlarda teslimat tarihinden itibaren 14 gün yasal cayma hakkı (6502 sayılı Kanun) geçerlidir.',
+        officialIban: 'Resmi Şirket Hesabı (Sipariş Teyidi Sonrası Temsilciniz Tarafından İletilir)',
       },
     },
     {
@@ -95,7 +133,7 @@ async function main() {
   for (const block of defaultBlocks) {
     await prisma.cmsBlock.upsert({
       where: { key: block.key },
-      update: { content: block.content },
+      update: OVERWRITE_CONTENT ? { content: block.content } : {},
       create: { key: block.key, content: block.content },
     });
   }
@@ -157,7 +195,7 @@ async function main() {
   for (const cat of categories) {
     const upserted = await prisma.category.upsert({
       where: { slug: cat.slug },
-      update: { name: cat.name, sortOrder: cat.sortOrder },
+      update: OVERWRITE_CONTENT ? { name: cat.name, sortOrder: cat.sortOrder } : {},
       create: { name: cat.name, slug: cat.slug, sortOrder: cat.sortOrder },
     });
     categoryMap.set(cat.slug, upserted.id);
@@ -745,6 +783,8 @@ async function main() {
       slug: 'toplu-ofis-kurulum-teklif-paketi',
       name: 'Toplu Ofis & Şirket Kurulum Teklif Paketi (B2B)',
       categorySlug: 'genel',
+      // Teklif paketi satılabilir bir ürün DEĞİLDİR: fiyat 0 olduğu için canPublishProduct yayına almaz, sepete eklenemez.
+      // (45.000 / 55.000 sahte indirimli fiyat paketi satılabilir yapıyordu; ERP'de karşılığı olmadığından talepler aktarılamıyordu.)
       price: 0,
       originalPrice: null,
       stock: 100,
@@ -812,32 +852,34 @@ async function main() {
 
     await prisma.product.upsert({
       where: { slug: p.slug },
-      update: {
-        categoryId,
-        name: p.name,
-        price: p.price,
-        originalPrice: p.originalPrice || null,
-        stock: p.stock,
-        inStock: p.inStock,
-        leadTimeDays: p.leadTimeDays,
-        image: p.image,
-        images: p.images,
-        description: p.description,
-        material: p.material,
-        dimensions: `${p.widthCm}x${p.depthCm}x${p.heightCm} cm`,
-        widthCm: p.widthCm,
-        depthCm: p.depthCm,
-        heightCm: p.heightCm,
-        drawerCount: p.drawerCount,
-        unitCount: p.unitCount,
-        badge: p.badge,
-        colors: p.colors,
-        setPieces: p.setPieces,
-        features: p.features,
-        isPublished: true,
-        erpItemId: p.erpItemId,
-        erpItemCode: p.erpItemCode,
-      },
+      update: OVERWRITE_CONTENT
+        ? {
+          categoryId,
+          name: p.name,
+          price: p.price,
+          originalPrice: p.originalPrice || null,
+          stock: p.stock,
+          inStock: p.inStock,
+          leadTimeDays: p.leadTimeDays,
+          image: p.image,
+          images: p.images,
+          description: p.description,
+          material: p.material,
+          dimensions: `${p.widthCm}x${p.depthCm}x${p.heightCm} cm`,
+          widthCm: p.widthCm,
+          depthCm: p.depthCm,
+          heightCm: p.heightCm,
+          drawerCount: p.drawerCount,
+          unitCount: p.unitCount,
+          badge: p.badge,
+          colors: p.colors,
+          setPieces: p.setPieces,
+          features: p.features,
+          isPublished: true,
+          erpItemId: p.erpItemId,
+          erpItemCode: p.erpItemCode,
+        }
+        : {},
       create: {
         categoryId,
         name: p.name,

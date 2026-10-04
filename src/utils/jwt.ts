@@ -13,7 +13,7 @@ function getJwtSecret(): string {
 }
 
 const JWT_SECRET = getJwtSecret();
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '12h';
 
 export interface JwtPayload {
   userId: string;

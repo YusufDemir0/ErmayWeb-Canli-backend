@@ -2,16 +2,32 @@ import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { getOrSetCache, delCache } from '../utils/cache';
 
-const STORES_CACHE_KEY = 'stores:all';
 const STORES_CACHE_TTL = 3600; // 1 hour
+
+async function invalidateStoreCaches(): Promise<void> {
+  await Promise.allSettled([
+    delCache('stores:active'),
+    delCache('stores:all:admin'),
+    delCache('stores:all'),
+  ]);
+}
 
 /**
  * Tüm Mağazaları ve Bayileri Listeleme
+ * Varsayılan olarak yalnızca aktif (isActive: true) mağazalar listelenir.
+ * Admin kullanıcılar ?all=true ile kapalı mağazaları da görebilir.
  */
 export async function getStores(req: Request, res: Response): Promise<void> {
   try {
-    const stores = await getOrSetCache(STORES_CACHE_KEY, STORES_CACHE_TTL, async () => {
+    const userRole = (req as { user?: { role?: string } }).user?.role;
+    const isAdmin = userRole === 'ADMIN';
+    const includeInactive = isAdmin && req.query.all === 'true';
+
+    const cacheKey = includeInactive ? 'stores:all:admin' : 'stores:active';
+
+    const stores = await getOrSetCache(cacheKey, STORES_CACHE_TTL, async () => {
       return prisma.store.findMany({
+        where: includeInactive ? {} : { isActive: true },
         orderBy: { createdAt: 'asc' },
       });
     });
@@ -38,22 +54,26 @@ export async function createStore(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const sanitizedIsActive = isActive !== undefined
+      ? (typeof isActive === 'boolean' ? isActive : isActive === 'true' || isActive === 1 || isActive === '1')
+      : true;
+
     const store = await prisma.store.create({
       data: {
-        name,
-        city,
-        district,
-        address,
-        phone,
-        email,
-        hours: hours || 'Haftanın her günü 09:00 - 20:00',
-        image,
-        mapUrl,
-        isActive: isActive !== undefined ? isActive : true,
+        name: String(name).trim(),
+        city: String(city).trim(),
+        district: district ? String(district).trim() : null,
+        address: String(address).trim(),
+        phone: String(phone).trim(),
+        email: email ? String(email).trim() : null,
+        hours: hours ? String(hours).trim() : 'Haftanın her günü 09:00 - 20:00',
+        image: image || null,
+        mapUrl: mapUrl || null,
+        isActive: sanitizedIsActive,
       },
     });
 
-    await delCache(STORES_CACHE_KEY).catch(() => {});
+    await invalidateStoreCaches();
 
     res.status(201).json({
       success: true,
@@ -80,23 +100,27 @@ export async function updateStore(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const sanitizedIsActive = isActive !== undefined
+      ? (typeof isActive === 'boolean' ? isActive : isActive === 'true' || isActive === 1 || isActive === '1')
+      : existing.isActive;
+
     const store = await prisma.store.update({
       where: { id },
       data: {
-        name: name || existing.name,
-        city: city || existing.city,
-        district: district !== undefined ? district : existing.district,
-        address: address || existing.address,
-        phone: phone || existing.phone,
-        email: email !== undefined ? email : existing.email,
-        hours: hours || existing.hours,
+        name: name !== undefined ? String(name).trim() : existing.name,
+        city: city !== undefined ? String(city).trim() : existing.city,
+        district: district !== undefined ? (district ? String(district).trim() : null) : existing.district,
+        address: address !== undefined ? String(address).trim() : existing.address,
+        phone: phone !== undefined ? String(phone).trim() : existing.phone,
+        email: email !== undefined ? (email ? String(email).trim() : null) : existing.email,
+        hours: hours !== undefined ? (hours ? String(hours).trim() : '') : existing.hours,
         image: image !== undefined ? image : existing.image,
         mapUrl: mapUrl !== undefined ? mapUrl : existing.mapUrl,
-        isActive: isActive !== undefined ? isActive : existing.isActive,
+        isActive: sanitizedIsActive,
       },
     });
 
-    await delCache(STORES_CACHE_KEY).catch(() => {});
+    await invalidateStoreCaches();
 
     res.status(200).json({
       success: true,
@@ -122,9 +146,27 @@ export async function deleteStore(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const linkedRequestCount = await prisma.orderRequest.count({
+      where: { preferredStoreId: id },
+    });
+
+    if (linkedRequestCount > 0) {
+      // Geçmiş taleplerde kullanılmış mağaza için FK constraint hatası almamak ve geçmiş veriyi korumak için pasife al
+      await prisma.store.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      await invalidateStoreCaches();
+      res.status(200).json({
+        success: true,
+        message: `Bu mağaza ${linkedRequestCount} adet geçmiş sipariş talebiyle ilişkilidir. Sipariş geçmişinin korunması için mağaza silinmek yerine pasife alındı.`,
+      });
+      return;
+    }
+
     await prisma.store.delete({ where: { id } });
 
-    await delCache(STORES_CACHE_KEY).catch(() => {});
+    await invalidateStoreCaches();
 
     res.status(200).json({
       success: true,

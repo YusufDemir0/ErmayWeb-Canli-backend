@@ -27,9 +27,14 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
+COPY entrypoint.sh ./entrypoint.sh
+
+RUN chmod +x ./entrypoint.sh && \
+    mkdir -p /app/uploads/private /app/uploads/optimized && \
+    chown -R backend:nodejs /app/uploads
 
 USER backend
 
 EXPOSE 5000
 
-CMD ["node", "dist/server.js"]
+ENTRYPOINT ["./entrypoint.sh"]

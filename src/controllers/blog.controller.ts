@@ -15,8 +15,11 @@ export async function getBlogPosts(req: Request, res: Response): Promise<void> {
     const limitNum = Math.min(50, Math.max(1, parseInt(limit as string, 10) || 12));
     const skip = (pageNum - 1) * limitNum;
 
+    const userRole = (req as { user?: { role?: string } }).user?.role;
+    const isAdmin = userRole === 'ADMIN';
+
     const where: any = {};
-    if (all !== 'true') {
+    if (!isAdmin || all !== 'true') {
       where.isPublished = true;
     }
 
@@ -74,7 +77,10 @@ export async function getBlogPostBySlug(req: Request, res: Response): Promise<vo
       where: { slug },
     });
 
-    if (!post) {
+    const userRole = (req as { user?: { role?: string } }).user?.role;
+    const isAdmin = userRole === 'ADMIN';
+
+    if (!post || (!post.isPublished && !isAdmin)) {
       res.status(404).json({ success: false, message: 'Blog yazısı bulunamadı.' });
       return;
     }

@@ -19,71 +19,74 @@ export interface RetentionReport {
 export async function runRetentionAnonymization(): Promise<RetentionReport | null> {
   const startTime = Date.now();
 
-  const lockResult = await prisma.$queryRaw<Array<{ pg_try_advisory_lock: boolean }>>`
-    SELECT pg_try_advisory_lock(${ADVISORY_LOCK_ID});
-  `;
-
-  const acquired = lockResult?.[0]?.pg_try_advisory_lock ?? false;
-  if (!acquired) {
-    console.log('[RetentionJob] Başka bir instance veri anonimleştirme işini yürütüyor (Advisory Lock meşgul).');
-    return null;
-  }
-
   try {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - RETENTION_DAYS);
 
-    console.log(`[RetentionJob] ${RETENTION_DAYS} günden eski (${cutoffDate.toISOString()}) tamamlanan/iptal edilen talepler taranıyor...`);
+    return await prisma.$transaction(
+      async (tx) => {
+        const lockResult = await tx.$queryRaw<Array<{ acquired: boolean }>>`
+          SELECT pg_try_advisory_xact_lock(${ADVISORY_LOCK_ID}) AS acquired;
+        `;
 
-    const eligibleRequests = await prisma.orderRequest.findMany({
-      where: {
-        status: { in: ['COMPLETED', 'CANCELLED'] },
-        createdAt: { lt: cutoffDate },
-        // Don't re-anonymize already anonymized records
-        customerName: { not: 'ANONİM MÜŞTERİ' },
+        const acquired = lockResult?.[0]?.acquired ?? false;
+        if (!acquired) {
+          console.log('[RetentionJob] Başka bir instance veri anonimleştirme işini yürütüyor (Advisory Lock meşgul).');
+          return null;
+        }
+
+        console.log(`[RetentionJob] ${RETENTION_DAYS} günden eski (${cutoffDate.toISOString()}) tamamlanan/iptal/spam talepler taranıyor...`);
+
+        const eligibleRequests = await tx.orderRequest.findMany({
+          where: {
+            status: { in: ['COMPLETED', 'CANCELLED', 'SPAM', 'EXPIRED'] },
+            createdAt: { lt: cutoffDate },
+            anonymizedAt: null,
+            customerName: { not: 'ANONİM MÜŞTERİ' },
+          },
+          select: { id: true, code: true },
+        });
+
+        let anonymizedCount = 0;
+
+        for (const req of eligibleRequests) {
+          await tx.orderRequest.update({
+            where: { id: req.id },
+            data: {
+              customerName: 'ANONİM MÜŞTERİ',
+              customerPhone: '+900000000000',
+              customerEmail: null,
+              addressLine: null,
+              note: '[KVKK 180 GÜN VERİ SAKLAMA POLİTİKASI GEREĞİ ANONİMLEŞTİRİLDİ]',
+              anonymizedAt: new Date(),
+            },
+          });
+
+          await tx.orderRequestEvent.create({
+            data: {
+              requestId: req.id,
+              type: 'KVKK_ANONYMIZED',
+              note: '180 günlük yasal saklama süresi dolduğu için kişisel veriler anonimleştirildi.',
+            },
+          });
+
+          anonymizedCount++;
+        }
+
+        const durationMs = Date.now() - startTime;
+        console.log(`[RetentionJob] Tamamlandı (${durationMs}ms): ${anonymizedCount} talep anonimleştirildi.`);
+
+        return {
+          anonymizedCount,
+          durationMs,
+          cutoffDate: cutoffDate.toISOString(),
+        };
       },
-      select: { id: true, code: true },
-    });
-
-    let anonymizedCount = 0;
-
-    for (const req of eligibleRequests) {
-      await prisma.$transaction([
-        prisma.orderRequest.update({
-          where: { id: req.id },
-          data: {
-            customerName: 'ANONİM MÜŞTERİ',
-            customerPhone: '+900000000000',
-            customerEmail: null,
-            addressLine: null,
-            note: '[KVKK 180 GÜN VERİ SAKLAMA POLİTİKASI GEREĞİ ANONİMLEŞTİRİLDİ]',
-            anonymizedAt: new Date(),
-          },
-        }),
-        prisma.orderRequestEvent.create({
-          data: {
-            requestId: req.id,
-            type: 'KVKK_ANONYMIZED',
-            note: '180 günlük yasal saklama süresi dolduğu için kişisel veriler anonimleştirildi.',
-          },
-        }),
-      ]);
-      anonymizedCount++;
-    }
-
-    const durationMs = Date.now() - startTime;
-    console.log(`[RetentionJob] Tamamlandı (${durationMs}ms): ${anonymizedCount} talep anonimleştirildi.`);
-
-    return {
-      anonymizedCount,
-      durationMs,
-      cutoffDate: cutoffDate.toISOString(),
-    };
+      { timeout: 60000 }
+    );
   } catch (err: unknown) {
     console.error('[RetentionJob] Anonimleştirme hatası:', err);
     return null;
-  } finally {
-    await prisma.$queryRaw`SELECT pg_advisory_unlock(${ADVISORY_LOCK_ID});`;
   }
 }
 

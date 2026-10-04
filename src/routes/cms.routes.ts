@@ -7,6 +7,7 @@ import { UpdateCmsBlockSchema } from '../validations';
 const router = Router();
 
 router.get('/', getAllCmsBlocks);
+router.get('/blocks/:key', getCmsBlock);
 router.get('/:key', getCmsBlock);
 router.put('/:key', authenticateToken, authorizeRoles('ADMIN'), validateRequest(UpdateCmsBlockSchema), updateCmsBlock);
 router.post('/telegram/test', authenticateToken, authorizeRoles('ADMIN'), testTelegramConnection);

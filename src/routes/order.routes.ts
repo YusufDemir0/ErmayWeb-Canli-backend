@@ -6,17 +6,18 @@ import {
   getAdminRequestById,
   updateRequestStatus,
   retryErpSync,
+  triggerDailySalesReport,
 } from '../controllers/orderRequest.controller';
-import { triggerDailySalesReport } from '../controllers/order.controller';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { requestCreateLimiter, publicReceiptLimiter } from '../middlewares/rateLimiters';
 
 const router = Router();
 
 // ==========================================
 // Customer Endpoints (Backward compatibility)
 // ==========================================
-router.post('/', createOrderRequest);
-router.get('/public/:token', getPublicReceipt);
+router.post('/', requestCreateLimiter, createOrderRequest);
+router.get('/public/:token', publicReceiptLimiter, getPublicReceipt);
 
 // Kapalı uç noktalar
 router.get('/track/:orderNumber', (_req, res) => {

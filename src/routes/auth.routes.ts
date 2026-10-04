@@ -26,6 +26,7 @@ export const loginLimiter = rateLimit({
   standardHeaders: 'draft-7',
   legacyHeaders: false,
   skipSuccessfulRequests: true,
+  validate: { trustProxy: false, xForwardedForHeader: false },
   message: {
     success: false,
     message: 'Çok fazla başarısız giriş denemesi. Lütfen 15 dakika sonra tekrar deneyiniz.',

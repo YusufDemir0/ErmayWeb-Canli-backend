@@ -53,10 +53,12 @@ export async function login(req: Request, res: Response): Promise<void> {
       role: adminUser.role,
     });
 
+    const isSecureCookie = req.secure || req.headers['x-forwarded-proto'] === 'https' || (isProduction && !req.headers.host?.includes('localhost') && !req.headers.host?.includes('127.0.0.1'));
+
     // Set secure cross-origin compatible HttpOnly Cookie
     res.cookie('ermay_admin', token, {
       httpOnly: true,
-      secure: isProduction,
+      secure: isSecureCookie,
       sameSite: 'lax',
       maxAge: 12 * 60 * 60 * 1000, // 12 hours
       path: '/',

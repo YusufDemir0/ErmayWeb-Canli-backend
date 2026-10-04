@@ -6,12 +6,12 @@ import {
   updateBlogPost,
   deleteBlogPost,
 } from '../controllers/blog.controller';
-import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { authenticateToken, authorizeRoles, authenticateOptionalToken } from '../middlewares/auth.middleware';
 
 const router = Router();
 
-router.get('/', getBlogPosts);
-router.get('/:slug', getBlogPostBySlug);
+router.get('/', authenticateOptionalToken, getBlogPosts);
+router.get('/:slug', authenticateOptionalToken, getBlogPostBySlug);
 
 router.post('/', authenticateToken, authorizeRoles('ADMIN'), createBlogPost);
 router.put('/:id', authenticateToken, authorizeRoles('ADMIN'), updateBlogPost);

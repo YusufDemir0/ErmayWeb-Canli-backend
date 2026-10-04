@@ -20,36 +20,41 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB strict limit
   fileFilter: (_req, file, cb) => {
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
     const ext = path.extname(file.originalname).toLowerCase();
 
     if (allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Yalnızca güvenli görsel (PNG, JPEG, WEBP) ve PDF belgeleri yüklenebilir.'));
+      cb(new Error('Yalnızca güvenli görsel (PNG, JPEG, WEBP) formatları yüklenebilir.'));
     }
   },
 });
 
 /**
- * Validate Buffer Magic Bytes for Image & Document Security (Stored XSS / File Upload Bypass Prevention)
+ * Validate Buffer Magic Bytes for Image Security (Stored XSS / File Upload Bypass Prevention)
  */
 function isValidFileBuffer(buffer: Buffer, ext: string): boolean {
-  if (buffer.length < 4) return false;
-
-  const headerHex = buffer.subarray(0, 8).toString('hex').toUpperCase();
+  if (buffer.length < 12) return false;
 
   // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (ext === '.png' && headerHex.startsWith('89504E47')) return true;
+  if (ext === '.png') {
+    const pngMagic = buffer.subarray(0, 8).toString('hex').toUpperCase();
+    return pngMagic === '89504E470D0A1A0A';
+  }
 
   // JPEG: FF D8 FF
-  if ((ext === '.jpg' || ext === '.jpeg') && headerHex.startsWith('FFD8FF')) return true;
+  if (ext === '.jpg' || ext === '.jpeg') {
+    const jpgMagic = buffer.subarray(0, 3).toString('hex').toUpperCase();
+    return jpgMagic === 'FFD8FF';
+  }
 
-  // WEBP: 52 49 46 46 (RIFF) ... 57 45 42 50 (WEBP)
-  if (ext === '.webp' && headerHex.startsWith('52494646')) return true;
-
-  // PDF: 25 50 44 46 (%PDF-)
-  if (ext === '.pdf' && headerHex.startsWith('25504446')) return true;
+  // WEBP: Bytes 0-3 = "RIFF", Bytes 8-11 = "WEBP"
+  if (ext === '.webp') {
+    const riff = buffer.subarray(0, 4).toString('ascii');
+    const webp = buffer.subarray(8, 12).toString('ascii');
+    return riff === 'RIFF' && webp === 'WEBP';
+  }
 
   return false;
 }
@@ -78,7 +83,7 @@ router.post('/', authenticateToken, upload.single('file'), async (req: Request, 
       return;
     }
 
-    const isPrivate = req.query.isPrivate === '1' || req.query.isPrivate === 'true' || req.body.isPrivate === 'true' || cleanExt === '.pdf';
+    const isPrivate = req.query.isPrivate === '1' || req.query.isPrivate === 'true' || req.body.isPrivate === 'true';
     const targetDir = isPrivate ? privateUploadsDir : publicUploadsDir;
 
     // Cryptographic SHA-256 hash for deduplication and unique collision-free naming
@@ -103,7 +108,7 @@ router.post('/', authenticateToken, upload.single('file'), async (req: Request, 
         return;
       }
 
-      await sharp(req.file.buffer)
+      await sharp(req.file.buffer, { limitInputPixels: 25000000 })
         .rotate()
         .resize({ width: 1920, withoutEnlargement: true })
         .webp({ quality: 82, effort: 4 })

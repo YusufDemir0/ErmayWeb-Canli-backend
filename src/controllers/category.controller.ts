@@ -103,10 +103,31 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
       return;
     }
 
-    // Döngüsel ebeveynlik kontrolü
-    if (parentId && parentId === id) {
-      res.status(400).json({ success: false, message: 'Bir kategori kendi kendisinin alt kategorisi olamaz.' });
-      return;
+    // Döngüsel ebeveynlik kontrolü (Doğrudan ve dolaylı döngüler)
+    if (parentId) {
+      if (parentId === id) {
+        res.status(400).json({ success: false, message: 'Bir kategori kendi kendisinin alt kategorisi olamaz.' });
+        return;
+      }
+
+      // Ancestor ağacını gezerek A -> B -> C -> A döngüsünü engelle
+      let currentParentId: string | null = parentId;
+      const visited = new Set<string>([id]);
+      while (currentParentId) {
+        if (visited.has(currentParentId)) {
+          res.status(400).json({
+            success: false,
+            message: 'Döngüsel kategori hiyerarşisi oluşturulamaz (Seçilen üst kategori, bu kategorinin bir alt dalıdır).',
+          });
+          return;
+        }
+        visited.add(currentParentId);
+        const parentCat = await prisma.category.findUnique({
+          where: { id: currentParentId },
+          select: { parentId: true },
+        });
+        currentParentId = parentCat ? parentCat.parentId : null;
+      }
     }
 
     const dataToUpdate: Prisma.CategoryUpdateInput = {};
@@ -148,7 +169,8 @@ export async function reorderCategories(req: Request, res: Response): Promise<vo
       return;
     }
 
-    // Döngüsel ebeveyn kontrolü (id === parentId)
+    // Döngüsel ebeveyn kontrolü (id === parentId ve hiyerarşi döngüleri)
+    const parentMap = new Map<string, string | null>();
     for (const item of items) {
       if (item.parentId && item.id === item.parentId) {
         res.status(400).json({
@@ -156,6 +178,23 @@ export async function reorderCategories(req: Request, res: Response): Promise<vo
           message: `Kategori (${item.id}) kendi kendisinin alt kategorisi olamaz.`,
         });
         return;
+      }
+      parentMap.set(item.id, item.parentId || null);
+    }
+
+    for (const item of items) {
+      let curr = item.parentId;
+      const seen = new Set<string>([item.id]);
+      while (curr) {
+        if (seen.has(curr)) {
+          res.status(400).json({
+            success: false,
+            message: 'Döngüsel kategori hiyerarşisi tespit edildi. Lütfen kategori ebeveyn ilişkilerini kontrol edin.',
+          });
+          return;
+        }
+        seen.add(curr);
+        curr = parentMap.has(curr) ? parentMap.get(curr)! : null;
       }
     }
 
@@ -213,25 +252,35 @@ export async function deleteCategory(req: Request, res: Response): Promise<void>
 
     const productCount = await prisma.product.count({ where: { categoryId: id } });
     if (productCount > 0) {
-      let targetCatId = typeof reassignTo === 'string' && reassignTo ? reassignTo : null;
+      const targetCatId = typeof reassignTo === 'string' ? reassignTo.trim() : '';
       if (!targetCatId) {
-        const otherCat = await prisma.category.findFirst({
-          where: { id: { not: id } },
-          orderBy: { name: 'asc' },
+        res.status(400).json({
+          success: false,
+          message: `Bu kategoride ${productCount} adet ürün bulunmaktadır. Kategoriyi silmeden önce ürünlerin aktarılacağı hedef kategoriyi (reassignTo parametresi ile) belirtmelisiniz.`,
         });
-        if (otherCat) {
-          targetCatId = otherCat.id;
-        } else {
-          const defaultCat = await prisma.category.create({
-            data: { name: 'Genel', slug: 'genel', description: 'Genel Kategori' },
-          });
-          targetCatId = defaultCat.id;
-        }
+        return;
+      }
+
+      if (targetCatId === id) {
+        res.status(400).json({
+          success: false,
+          message: 'Ürünler silinmekte olan kategoriye yeniden atanamaz.',
+        });
+        return;
+      }
+
+      const targetCat = await prisma.category.findUnique({ where: { id: targetCatId } });
+      if (!targetCat) {
+        res.status(404).json({
+          success: false,
+          message: 'Ürünlerin aktarılacağı hedef kategori bulunamadı.',
+        });
+        return;
       }
 
       await prisma.product.updateMany({
         where: { categoryId: id },
-        data: { categoryId: targetCatId },
+        data: { categoryId: targetCat.id },
       });
     }
 

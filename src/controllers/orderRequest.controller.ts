@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../config/database';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
-import { validateRequestStateTransition } from '../services/orderStateMachine.service';
+import { validateRequestStateTransition, InvalidRequestStateTransitionError } from '../services/orderStateMachine.service';
 import { telegramService } from '../services/telegram.service';
 import { syncSingleRequestToErp } from '../jobs/erpOutbox.job';
 import {
@@ -12,10 +12,14 @@ import {
   maskCustomerName,
   maskCustomerPhone,
 } from '../validations/request.validation';
-import { RequestStatus, RequestPreference } from '@prisma/client';
+import { Prisma, RequestStatus, RequestPreference } from '@prisma/client';
+import { normalizeTurkishText } from '../utils/slug';
+import { dailyReportService } from '../services/dailyReport.service';
+import { invalidateCachePattern } from '../utils/cache';
 
 /**
  * Generate unique immutable order request code: WEB-YYMM-XXXX
+ * Uses cryptographic randomness to prevent predictable sequential enumeration.
  */
 function generateRequestCode(): string {
   const now = new Date();
@@ -24,7 +28,7 @@ function generateRequestCode(): string {
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   let rand = '';
   for (let i = 0; i < 4; i++) {
-    rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    rand += chars.charAt(crypto.randomInt(0, chars.length));
   }
   return `WEB-${yy}${mm}-${rand}`;
 }
@@ -127,7 +131,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
       res.status(201).json({
         success: true,
         message: 'Sipariş talebiniz başarıyla alındı.',
-        code: 'WEB-2609-0000',
+        code: generateRequestCode(),
         publicToken: crypto.randomBytes(16).toString('hex'),
         status: 'NEW',
       });
@@ -155,8 +159,9 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
       if (deliveryBlock && deliveryBlock.content) {
         const zones = deliveryBlock.content as { disabledCityNames?: string[] };
         const disabled = zones.disabledCityNames || [];
+        const normalizedCity = normalizeTurkishText(data.city);
         const isCityDisabled = disabled.some(
-          (c) => c.toLocaleLowerCase('tr-TR') === data.city.toLocaleLowerCase('tr-TR')
+          (c) => normalizeTurkishText(c) === normalizedCity
         );
         if (isCityDisabled) {
           res.status(400).json({
@@ -171,21 +176,22 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
     }
 
     // 4. Idempotency Key kontrolü (Çift tık / çift gönderim koruması)
-    const idempotencyKey = (req.headers['idempotency-key'] as string) || null;
-    if (idempotencyKey) {
-      const existing = await prisma.orderRequest.findUnique({
-        where: { idempotencyKey },
+    // Başlık göndermeyen eski istemciler reddedilmez (geriye dönük uyumluluk); yalnızca çift gönderim koruması
+    // olmadan tek seferlik anahtar atanır. Web sitesi her zaman başlığı gönderir.
+    const idempotencyKey = (req.headers['idempotency-key'] as string)?.trim() || `srv-${crypto.randomUUID()}`;
+
+    const existing = await prisma.orderRequest.findUnique({
+      where: { idempotencyKey },
+    });
+    if (existing) {
+      res.status(200).json({
+        success: true,
+        message: 'Talep daha önce oluşturulmuştu.',
+        code: existing.code,
+        publicToken: existing.publicToken,
+        status: existing.status,
       });
-      if (existing) {
-        res.status(200).json({
-          success: true,
-          message: 'Talep daha önce oluşturulmuştu.',
-          code: existing.code,
-          publicToken: existing.publicToken,
-          status: existing.status,
-        });
-        return;
-      }
+      return;
     }
 
     // 5. Ürünleri DB'den tek sorguda doğrula ve dondur (Snapshot - N+1 Fix)
@@ -236,7 +242,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
 
     // 6. Benzersiz Kod ve Kriptografik Public Token Üretimi
     let code = generateRequestCode();
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
       const exists = await prisma.orderRequest.findUnique({ where: { code } });
       if (!exists) break;
       code = generateRequestCode();
@@ -245,63 +251,81 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
     const publicToken = crypto.randomBytes(16).toString('hex');
     const targetPreference = data.preference === 'STORE_VISIT' ? RequestPreference.STORE_VISIT : RequestPreference.WHATSAPP;
 
-    // 7. Atomik Veritabanı Kaydı (PostgreSQL Advisory Lock ile korumalı)
-    const createdRequest = await prisma.$transaction(async (tx) => {
-      // Transaction-level advisory lock (Yarış koşullarına karşı koruma)
-      await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(987654321)');
-
-      const newRequest = await tx.orderRequest.create({
-        data: {
-          code,
-          publicToken,
-          idempotencyKey,
-          status: RequestStatus.NEW,
-          preference: targetPreference,
-          preferredStoreId: data.preferredStoreId || null,
-          customerName: data.customerName,
-          customerPhone: data.customerPhone,
-          customerEmail: data.customerEmail || null,
-          city: data.city,
-          district: data.district || null,
-          addressLine: data.addressLine || null,
-          note: data.note || null,
-          subtotal: totalSubtotal,
-          itemCount: resolvedItems.length,
-          kvkkNoticeAckAt: new Date(),
-          marketingConsent: Boolean(data.marketingConsent),
-          erpSyncStatus: 'PENDING',
-          erpAttempts: 0,
-          erpNextAttemptAt: new Date(),
-        },
-      });
-
-      for (const it of resolvedItems) {
-        await tx.orderRequestItem.create({
+    // 7. Atomik Veritabanı Kaydı (TOCTOU P2002 yakalamalı)
+    let createdRequest;
+    try {
+      createdRequest = await prisma.$transaction(async (tx) => {
+        const newRequest = await tx.orderRequest.create({
           data: {
-            requestId: newRequest.id,
-            productId: it.productId,
-            productNameSnap: it.productName,
-            erpItemCodeSnap: it.erpItemCode,
-            colorKey: it.colorKey,
-            colorLabel: it.colorLabel,
-            unitPriceSnap: it.unitPrice,
-            quantity: it.quantity,
-            lineTotal: it.lineTotal,
+            code,
+            publicToken,
+            idempotencyKey,
+            status: RequestStatus.NEW,
+            preference: targetPreference,
+            preferredStoreId: data.preferredStoreId || null,
+            customerName: data.customerName,
+            customerPhone: data.customerPhone,
+            customerEmail: data.customerEmail || null,
+            city: data.city,
+            district: data.district || null,
+            addressLine: data.addressLine || null,
+            note: data.note || null,
+            subtotal: totalSubtotal,
+            itemCount: resolvedItems.length,
+            kvkkNoticeAckAt: new Date(),
+            marketingConsent: Boolean(data.marketingConsent),
+            erpSyncStatus: 'PENDING',
+            erpAttempts: 0,
+            erpNextAttemptAt: new Date(),
           },
         });
-      }
 
-      await tx.orderRequestEvent.create({
-        data: {
-          requestId: newRequest.id,
-          type: 'STATUS_CHANGE',
-          toStatus: RequestStatus.NEW,
-          note: 'Sipariş talebi web sitesinden oluşturuldu.',
-        },
+        for (const it of resolvedItems) {
+          await tx.orderRequestItem.create({
+            data: {
+              requestId: newRequest.id,
+              productId: it.productId,
+              productNameSnap: it.productName,
+              erpItemCodeSnap: it.erpItemCode,
+              colorKey: it.colorKey,
+              colorLabel: it.colorLabel,
+              unitPriceSnap: it.unitPrice,
+              quantity: it.quantity,
+              lineTotal: it.lineTotal,
+            },
+          });
+        }
+
+        await tx.orderRequestEvent.create({
+          data: {
+            requestId: newRequest.id,
+            type: 'STATUS_CHANGE',
+            toStatus: RequestStatus.NEW,
+            note: 'Sipariş talebi web sitesinden oluşturuldu.',
+          },
+        });
+
+        return newRequest;
       });
-
-      return newRequest;
-    });
+    } catch (createErr: unknown) {
+      const prismaErr = createErr as { code?: string };
+      if (prismaErr?.code === 'P2002') {
+        const existingAfterRace = await prisma.orderRequest.findUnique({
+          where: { idempotencyKey },
+        });
+        if (existingAfterRace) {
+          res.status(200).json({
+            success: true,
+            message: 'Talep daha önce oluşturulmuştu.',
+            code: existingAfterRace.code,
+            publicToken: existingAfterRace.publicToken,
+            status: existingAfterRace.status,
+          });
+          return;
+        }
+      }
+      throw createErr;
+    }
 
     // 8. Maskeli Telegram Bildirimi (Arka planda)
     telegramService
@@ -425,12 +449,16 @@ export async function getAdminRequests(req: AuthenticatedRequest, res: Response)
 
     if (search) {
       const q = String(search).trim();
-      where.OR = [
+      const phoneDigits = q.replace(/\D/g, '');
+      const searchConditions: Prisma.OrderRequestWhereInput[] = [
         { code: { contains: q, mode: 'insensitive' } },
         { customerName: { contains: q, mode: 'insensitive' } },
-        { customerPhone: { contains: q } },
         { city: { contains: q, mode: 'insensitive' } },
       ];
+      if (phoneDigits.length >= 3) {
+        searchConditions.push({ customerPhone: { contains: phoneDigits } });
+      }
+      where.OR = searchConditions;
     }
 
     const [requests, totalCount] = await Promise.all([
@@ -443,6 +471,10 @@ export async function getAdminRequests(req: AuthenticatedRequest, res: Response)
           items: true,
           preferredStore: true,
           events: {
+            where: {
+              type: { in: ['NOTE', 'STATUS_CHANGE', 'MANUAL_NOTE'] },
+              note: { not: null },
+            },
             orderBy: { createdAt: 'desc' },
             take: 1,
           },
@@ -459,7 +491,7 @@ export async function getAdminRequests(req: AuthenticatedRequest, res: Response)
       totalAmount: Number(req.subtotal),
       subtotal: Number(req.subtotal),
       erpStatus: req.erpSyncStatus,
-      staffNote: req.events?.[0]?.note || req.note || null,
+      staffNote: (req.events?.[0]?.note && req.events[0].note.trim() !== '') ? req.events[0].note : req.note || null,
       items: req.items.map((it) => ({
         ...it,
         productName: it.productNameSnap,
@@ -515,12 +547,22 @@ export async function getAdminRequestById(req: AuthenticatedRequest, res: Respon
       return;
     }
 
+    const lastStaffEvent = [...(orderRequest.events || [])]
+      .reverse()
+      .find(
+        (e) =>
+          (e.type === 'NOTE' || e.type === 'STATUS_CHANGE' || e.type === 'MANUAL_NOTE') &&
+          e.note &&
+          e.note.trim() !== ''
+      );
+    const staffNote = lastStaffEvent?.note || orderRequest.note || null;
+
     const mappedRequest = {
       ...orderRequest,
       totalAmount: Number(orderRequest.subtotal),
       subtotal: Number(orderRequest.subtotal),
       erpStatus: orderRequest.erpSyncStatus,
-      staffNote: orderRequest.events?.slice(-1)[0]?.note || orderRequest.note || null,
+      staffNote,
       items: orderRequest.items.map((it) => ({
         ...it,
         productName: it.productNameSnap,
@@ -577,7 +619,19 @@ export async function updateRequestStatus(req: AuthenticatedRequest, res: Respon
     const shouldTransition = validateRequestStateTransition(existing.status, targetStatus);
 
     if (!shouldTransition) {
-      // Aynı durum: no-op
+      // Aynı durum: durum değişmez ama personel notu varsa kaybolmasın (önceden sessizce atılıyordu)
+      if (effectiveNote) {
+        await prisma.orderRequestEvent.create({
+          data: {
+            requestId,
+            type: 'NOTE',
+            actorId: req.user?.userId || 'ADMIN',
+            note: effectiveNote,
+          },
+        });
+        res.status(200).json({ success: true, message: 'Personel notu kaydedildi.', request: existing });
+        return;
+      }
       res.status(200).json({ success: true, message: 'Talep durumu zaten bu değerde.', request: existing });
       return;
     }
@@ -595,6 +649,27 @@ export async function updateRequestStatus(req: AuthenticatedRequest, res: Respon
         },
       });
 
+      // V-14: Increment product salesCount if transition is to PAID_OFFLINE or COMPLETED
+      const isPaidNow =
+        (targetStatus === 'PAID_OFFLINE' || targetStatus === 'COMPLETED') &&
+        existing.status !== 'PAID_OFFLINE' &&
+        existing.status !== 'COMPLETED';
+
+      if (isPaidNow) {
+        const items = await tx.orderRequestItem.findMany({
+          where: { requestId },
+          select: { productId: true, quantity: true },
+        });
+        for (const item of items) {
+          if (item.productId) {
+            await tx.product.update({
+              where: { id: item.productId },
+              data: { salesCount: { increment: item.quantity } },
+            }).catch(() => {});
+          }
+        }
+      }
+
       await tx.orderRequestEvent.create({
         data: {
           requestId,
@@ -609,12 +684,24 @@ export async function updateRequestStatus(req: AuthenticatedRequest, res: Respon
       return reqUpdated;
     });
 
+    const isPaidNow =
+      (targetStatus === 'PAID_OFFLINE' || targetStatus === 'COMPLETED') &&
+      existing.status !== 'PAID_OFFLINE' &&
+      existing.status !== 'COMPLETED';
+    if (isPaidNow) {
+      await invalidateCachePattern('products:*').catch(() => {});
+    }
+
     res.status(200).json({
       success: true,
       message: `Talep durumu "${STATUS_LABELS[targetStatus]}" olarak güncellendi.`,
       request: updated,
     });
   } catch (err: unknown) {
+    if (err instanceof InvalidRequestStateTransitionError) {
+      res.status(409).json({ success: false, message: err.message });
+      return;
+    }
     const msg = err instanceof Error ? err.message : 'Durum güncellenemedi.';
     res.status(400).json({ success: false, message: msg });
   }
@@ -645,16 +732,26 @@ export async function retryErpSync(req: AuthenticatedRequest, res: Response): Pr
       return;
     }
 
-    // Sıfırla ve yeniden dene
-    await prisma.orderRequest.update({
-      where: { id: requestId },
+    // Atomik Claim: Kaydı başka bir worker veya eşzamanlı admin işlemine karşı kilitle
+    const claimed = await prisma.orderRequest.updateMany({
+      where: {
+        id: requestId,
+        erpSyncStatus: { in: ['PENDING', 'FAILED'] },
+        erpSaleId: null,
+      },
       data: {
-        erpSyncStatus: 'PENDING',
-        erpAttempts: 0,
-        erpNextAttemptAt: new Date(),
+        erpSyncStatus: 'IN_PROGRESS',
         erpLastError: null,
       },
     });
+
+    if (claimed.count === 0) {
+      res.status(409).json({
+        success: false,
+        message: 'Bu talep şu anda başka bir işlem tarafından yürütülüyor veya zaten aktarılmış.',
+      });
+      return;
+    }
 
     await prisma.orderRequestEvent.create({
       data: {
@@ -665,14 +762,35 @@ export async function retryErpSync(req: AuthenticatedRequest, res: Response): Pr
       },
     });
 
-    const syncResult = await syncSingleRequestToErp(requestId);
+    // Non-blocking asynchronous dispatch so HTTP thread is not tied up for ERP timeout duration
+    setImmediate(async () => {
+      try {
+        await syncSingleRequestToErp(requestId);
+      } catch (syncErr) {
+        console.error(`[retryErpSync] Arka plan senkronizasyon hatası (Talep ID: ${requestId}):`, syncErr);
+      }
+    });
 
-    res.status(200).json({
-      success: syncResult.success,
-      message: syncResult.message,
+    res.status(202).json({
+      success: true,
+      message: 'ERP senkronizasyon talebi sıraya alındı ve arka planda işleme başlatıldı.',
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'ERP senkronizasyonu tetiklenemedi.';
+    res.status(500).json({ success: false, message: msg });
+  }
+}
+
+/**
+ * POST /api/v1/orders/daily-report or /api/v1/requests/daily-report (Admin only)
+ * Triggers daily summary digest calculation and dispatches masked report to Telegram.
+ */
+export async function triggerDailySalesReport(_req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const result = await dailyReportService.generateAndSendDailyReport();
+    res.status(200).json(result);
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Günlük rapor oluşturulamadı.';
     res.status(500).json({ success: false, message: msg });
   }
 }

@@ -6,6 +6,7 @@ import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
 import { invalidateCachePattern } from '../utils/cache';
 import type { Product } from '@prisma/client';
+import { ErpHttpError } from '../utils/erp';
 
 export interface ErpItem {
   id: string;
@@ -91,20 +92,33 @@ export interface ErpWebOrderInput {
 }
 
 export class ErpIntegrationService {
+  private cachedErpApiUrl: string | null = null;
+
   private getErpApiUrl(): string {
+    if (this.cachedErpApiUrl) return this.cachedErpApiUrl;
     const rawUrl = process.env.ERP_API_URL || '';
     const isDocker = fs.existsSync('/.dockerenv');
     if (rawUrl) {
       if (isDocker && (rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1'))) {
-        return rawUrl.replace('localhost', '172.17.0.1').replace('127.0.0.1', '172.17.0.1');
+        this.cachedErpApiUrl = rawUrl.replace('localhost', 'host.docker.internal').replace('127.0.0.1', 'host.docker.internal');
+      } else {
+        this.cachedErpApiUrl = rawUrl;
       }
-      return rawUrl;
+      return this.cachedErpApiUrl;
     }
-    return isDocker ? 'http://172.17.0.1:5143/api' : 'http://localhost:5143/api';
+    this.cachedErpApiUrl = isDocker ? 'http://host.docker.internal:5143/api' : 'http://localhost:5143/api';
+    return this.cachedErpApiUrl;
   }
 
   private getErpKey(): string {
-    return process.env.ERP_INTEGRATION_KEY || 'ermay_web_erp_secure_key_2026';
+    const key = process.env.ERP_INTEGRATION_KEY;
+    if (!key) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('HATA: ERP_INTEGRATION_KEY ortam değişkeni tanımlanmamıştır.');
+      }
+      return 'ermay_web_erp_dev_key';
+    }
+    return key;
   }
 
   private async request<T>(method: string, path: string, body?: unknown, extraHeaders?: Record<string, string>): Promise<T> {
@@ -138,13 +152,13 @@ export class ErpIntegrationService {
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                 resolve(parsed);
               } else {
-                reject(new Error(parsed.message || `ERP API Hatası: ${res.statusCode}`));
+                reject(new ErpHttpError(Array.isArray(parsed.message) ? parsed.message.join('; ') : (parsed.message || `ERP API Hatası: ${res.statusCode}`), res.statusCode || 0));
               }
             } catch {
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
                 resolve(data as unknown as T);
               } else {
-                reject(new Error(`ERP API Yanıtı Çözümlenemedi (${res.statusCode}): ${data}`));
+                reject(new ErpHttpError(`ERP API Yanıtı Çözümlenemedi (${res.statusCode}): ${data.slice(0, 300)}`, res.statusCode || 0));
               }
             }
           });
@@ -180,12 +194,16 @@ export class ErpIntegrationService {
         'GET',
         '/integration/items',
       );
-      const items = res.items || [];
+      // Yanıt gövdesi beklenen şekilde değilse boş liste sayma: katalog senkronu tüm ürünleri yayından kaldırır.
+      if (!res || typeof res !== 'object' || !Array.isArray(res.items)) {
+        throw new Error('ERP API /integration/items yanıtı geçersiz: "items" dizisi bulunamadı.');
+      }
+      const items = res.items;
       this.cachedErpItems = { items, timestamp: now };
       return items;
     } catch (err: unknown) {
-      if (this.cachedErpItems) {
-        return this.cachedErpItems.items; // Fallback to existing cache if ERP throttled
+      if (!forceFresh && this.cachedErpItems) {
+        return this.cachedErpItems.items; // Fallback to existing cache only when forceFresh is false
       }
       throw err;
     }
@@ -219,31 +237,8 @@ export class ErpIntegrationService {
     });
 
     if (erpItems.length === 0) {
-      // Fallback: Return existing DB products as catalog items
-      return webProducts.map((wp) => ({
-        erpId: wp.erpItemId,
-        erpCode: wp.erpItemCode || wp.slug,
-        erpName: wp.name,
-        erpSalePrice: Number(wp.price),
-        erpStock: wp.stock,
-        erpType: wp.category?.name || 'Mobilya',
-        erpImage: wp.image,
-        webProduct: {
-          id: wp.id,
-          name: wp.name,
-          slug: wp.slug,
-          price: Number(wp.price),
-          stock: wp.stock,
-          isPublished: wp.isPublished,
-          images: wp.images || [],
-          image: wp.image || '',
-          categoryId: wp.categoryId,
-          categoryName: wp.category?.name || '',
-          description: wp.description,
-          dimensions: wp.dimensions,
-          material: wp.material,
-        },
-      }));
+      // If ERP API is unreachable or returned 0 items, return empty array to prevent ghost items in ErpSyncTab
+      return [];
     }
 
     const webProductMap = new Map<string, (typeof webProducts)[number]>();
@@ -251,7 +246,7 @@ export class ErpIntegrationService {
       if (wp.erpItemId) webProductMap.set(wp.erpItemId, wp);
     });
 
-    return erpItems.map((erp) => {
+    const result: CatalogItem[] = erpItems.map((erp) => {
       const matched = webProductMap.get(erp.id);
       return {
         erpId: erp.id,
@@ -280,6 +275,8 @@ export class ErpIntegrationService {
           : null,
       };
     });
+
+    return result;
   }
 
   /**
@@ -401,17 +398,26 @@ export class ErpIntegrationService {
       extraHeaders['x-external-ref'] = orderData.externalRef;
     }
 
-    // ERP validator uses strict whitelist. Remove non-whitelisted alias and header fields from body:
-    const { externalRef, orderNumber, customerName, customerPhone, customerEmail, addressLine, ...bodyPayload } = orderData;
+    // ERP (NestJS) ValidationPipe `whitelist + forbidNonWhitelisted` ile çalışır ve WebOrderDto'da externalRef YOKTUR:
+    // gövdede bırakılırsa her sipariş 400 ile reddedilir. externalRef yalnızca başlıklarda (Idempotency-Key / x-external-ref)
+    // taşınır; alias/görüntüleme alanları da gövdeden çıkarılır.
+    const { externalRef: _externalRef, orderNumber, customerName, customerPhone, customerEmail, addressLine, ...bodyPayload } = orderData;
 
     const res = await this.request<{
-      success: boolean;
+      success?: boolean;
       saleId: string;
       saleCode: string;
       orderNumber?: string;
       grandTotal: number | string;
       partyId: string;
+      message?: string;
     }>('POST', '/integration/orders', bodyPayload, extraHeaders);
+
+    if (!res || !res.saleId || res.success === false) {
+      throw new Error(
+        `ERP sipariş kaydı oluşturulamadı: ${res?.message || JSON.stringify(res)}`
+      );
+    }
 
     return {
       saleId: res.saleId,

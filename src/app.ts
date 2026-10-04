@@ -12,8 +12,10 @@ import { imageOptimizerMiddleware } from './middlewares/imageOptimizer.middlewar
 
 export const app = express();
 
-// 1. Trust Proxy Configuration (Reverse Proxy + Next.js hop count)
-app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 2));
+// 1. Trust Proxy Configuration: yalnızca loopback ve RFC1918/ULA özel ağlar (Docker ağları, Next.js proxy, host nginx).
+// 'uniquelocal' = 10/8, 172.16/12, 192.168/16, fc00::/7. Önceki `ip.startsWith('172.')` kontrolü 172.217.x gibi
+// herkese açık adreslere de güveniyor ve X-Forwarded-For ile hız sınırının atlatılmasına izin veriyordu.
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 
 // 2. Disable Fingerprinting & Info Disclosure
 app.disable('x-powered-by');
@@ -21,12 +23,6 @@ app.disable('x-powered-by');
 // 3. High-Performance Gzip / Deflate Compression
 app.use(compression({
   threshold: 1024, // Compress responses larger than 1KB
-  filter: (req, res) => {
-    if (req.headers['x-no-compression']) {
-      return false;
-    }
-    return compression.filter(req, res);
-  },
 }));
 
 // 4. Enterprise Security Headers (Helmet)
@@ -103,7 +99,17 @@ app.use((req, res, next) => {
 
 // 8. Structured HTTP Request Logging with Request ID and Client IP
 morgan.token('req-id', (req: express.Request) => (req.headers['x-request-id'] as string) || '-');
-morgan.token('real-ip', (req: express.Request) => req.ip || req.socket.remoteAddress || '-');
+morgan.token('real-ip', (req: express.Request) => {
+  const ip = req.ip || req.socket.remoteAddress || '-';
+  if (ip.includes('.')) {
+    return ip.replace(/\.\d+$/, '.0'); // Zero out last octet for IPv4
+  }
+  if (ip.includes(':')) {
+    const parts = ip.split(':');
+    return parts.slice(0, 4).join(':') + '::'; // Mask lower bits for IPv6
+  }
+  return ip;
+});
 app.use(morgan('[:date[iso]] [:req-id] [:real-ip] :method :url :status :response-time ms - :res[content-length]'));
 
 // 9. Resilient Rate Limiter (No bypass header, trusted client IP)
@@ -112,6 +118,7 @@ const limiter = rateLimit({
   max: 300, // 300 requests per 15 minutes per IP
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false, xForwardedForHeader: false },
   message: { success: false, message: 'Çok fazla istek gönderdiniz. Lütfen 15 dakika sonra tekrar deneyiniz.' },
 });
 

@@ -1,6 +1,5 @@
 import { prisma } from '../config/database';
 import { telegramService } from './telegram.service';
-import { emailService } from './email.service';
 
 export class DailyReportService {
   /**
@@ -8,14 +7,19 @@ export class DailyReportService {
    * Fixes Finding N8 (masking) & Finding N9 (timezone + no fake fallback orders).
    */
   async generateAndSendDailyReport(): Promise<{ success: boolean; message: string; data?: unknown }> {
-    // Calculate yesterday's boundaries in Europe/Istanbul
-    const now = new Date();
-    // 24 hours ago
-    const startOfYesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    startOfYesterday.setHours(0, 0, 0, 0);
+    // Calculate yesterday's boundaries in Europe/Istanbul (UTC+3, no DST in TR)
+    const ISTANBUL_OFFSET_MS = 3 * 60 * 60 * 1000;
+    const nowIstanbul = new Date(Date.now() + ISTANBUL_OFFSET_MS);
 
-    const endOfYesterday = new Date(startOfYesterday);
-    endOfYesterday.setHours(23, 59, 59, 999);
+    // Yesterday in Istanbul
+    const yesterdayIstanbul = new Date(nowIstanbul.getTime() - 24 * 60 * 60 * 1000);
+    const yYear = yesterdayIstanbul.getUTCFullYear();
+    const yMonth = yesterdayIstanbul.getUTCMonth();
+    const yDate = yesterdayIstanbul.getUTCDate();
+
+    // Start of yesterday 00:00:00 Istanbul -> UTC equivalent
+    const startOfYesterday = new Date(Date.UTC(yYear, yMonth, yDate, 0, 0, 0) - ISTANBUL_OFFSET_MS);
+    const endOfYesterday = new Date(Date.UTC(yYear, yMonth, yDate, 23, 59, 59, 999) - ISTANBUL_OFFSET_MS);
 
     const dateStr = startOfYesterday.toLocaleDateString('tr-TR', {
       timeZone: 'Europe/Istanbul',

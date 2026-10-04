@@ -47,8 +47,12 @@ export async function imageOptimizerMiddleware(req: Request, res: Response, next
   }
 
   try {
-    const widthParam = req.query.w ? parseInt(req.query.w as string, 10) : 1200;
-    const targetWidth = Math.min(Math.max(widthParam || 1200, 100), 1920);
+    const ALLOWED_WIDTHS = [400, 800, 1200, 1920];
+    const rawWidth = req.query.w ? parseInt(req.query.w as string, 10) : 1200;
+    // Snap to the closest allowed width to prevent cache bomb / disk exhaustion attacks
+    const targetWidth = !rawWidth || isNaN(rawWidth)
+      ? 1200
+      : (ALLOWED_WIDTHS.find((w) => rawWidth <= w) || 1920);
     const targetQuality = 75;
 
     // Fast ETag check based on original file size, mtime, and requested width
@@ -73,8 +77,8 @@ export async function imageOptimizerMiddleware(req: Request, res: Response, next
       return;
     }
 
-    // Process original file with sharp
-    const optimizedBuffer = await sharp(originalFilePath)
+    // Process original file with sharp (limited to 25 million pixels to guard against decompression bombs)
+    const optimizedBuffer = await sharp(originalFilePath, { limitInputPixels: 25000000 })
       .resize({
         width: targetWidth,
         withoutEnlargement: true,

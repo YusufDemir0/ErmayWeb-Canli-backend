@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeTurkishPhone } from './request.validation';
 
 export const LoginSchema = z.object({
   email: z.string().optional(),
@@ -82,6 +83,27 @@ export const ReorderCategoriesSchema = z.object({
 export const UpdateCmsBlockSchema = z.object({
   content: z.union([z.record(z.unknown()), z.array(z.unknown()), z.string(), z.number(), z.boolean()]),
   description: z.string().optional(),
+});
+
+export const CreateContactMessageSchema = z.object({
+  name: z.string().trim().min(2, 'Ad Soyad en az 2 karakter olmalıdır.').max(100, 'Ad Soyad en fazla 100 karakter olabilir.'),
+  phone: z
+    .string()
+    .trim()
+    .transform(normalizeTurkishPhone)
+    // Kurumsal müşteriler sabit hat / yurt dışı numarası da yazabilir (frontend ile aynı kural: 8-15 hane)
+    .refine((val) => /^[0-9+()\s-]+$/.test(val) && val.replace(/\D/g, '').length >= 8 && val.replace(/\D/g, '').length <= 15, {
+      message: 'Lütfen geçerli bir telefon numarası giriniz.',
+    }),
+  email: z
+    .string()
+    .trim()
+    .max(150)
+    .email('Geçerli bir e-posta adresi giriniz.')
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+  subject: z.string().trim().min(2, 'Konu en az 2 karakter olmalıdır.').max(150).default('Genel İletişim'),
+  message: z.string().trim().min(10, 'Mesajınız en az 10 karakter olmalıdır.').max(3000, 'Mesajınız en fazla 3000 karakter olabilir.'),
 });
 
 export * from './request.validation';

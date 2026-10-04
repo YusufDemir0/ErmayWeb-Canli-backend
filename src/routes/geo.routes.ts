@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { prisma } from '../config/database';
 import { getOrSetCache, delCache } from '../utils/cache';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
@@ -8,6 +9,13 @@ const inMemoryGeoCache = new Map<string, { data: unknown; timestamp: number }>()
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DELIVERY_ZONES_CACHE_KEY = 'geo:delivery_zones';
 const DELIVERY_ZONES_CACHE_TTL = 1800; // 30 minutes
+
+const reverseGeoLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 requests per minute per IP
+  validate: { trustProxy: false, xForwardedForHeader: false },
+  message: { success: false, message: 'Çok fazla konum sorgusu yapıldı. Lütfen biraz bekleyin.' },
+});
 
 export interface DeliveryZonesConfig {
   disabledCityIds: number[];
@@ -57,9 +65,21 @@ router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), async 
   try {
     const { disabledCityIds = [], disabledCityNames = [], noticeMessage = '' } = req.body;
 
+    const sanitizedIds = Array.isArray(disabledCityIds)
+      ? disabledCityIds
+          .map((id) => parseInt(String(id), 10))
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= 81)
+      : [];
+
+    const sanitizedNames = Array.isArray(disabledCityNames)
+      ? disabledCityNames
+          .map((name) => String(name).trim())
+          .filter((name) => name.length > 0)
+      : [];
+
     const payload = {
-      disabledCityIds: Array.isArray(disabledCityIds) ? disabledCityIds.map(Number) : [],
-      disabledCityNames: Array.isArray(disabledCityNames) ? disabledCityNames.map(String) : [],
+      disabledCityIds: sanitizedIds,
+      disabledCityNames: sanitizedNames,
       noticeMessage: typeof noticeMessage === 'string' ? noticeMessage.trim() : '',
       updatedAt: new Date().toISOString(),
     };
@@ -84,7 +104,7 @@ router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), async 
   }
 });
 
-router.get('/reverse', async (req: Request, res: Response): Promise<void> => {
+router.get('/reverse', reverseGeoLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
     const { lat, lng } = req.query;
 

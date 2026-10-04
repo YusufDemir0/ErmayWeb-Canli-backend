@@ -30,13 +30,17 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
   try {
     const { category, search, minPrice, maxPrice, sort, page = '1', limit = '24' } = req.query;
 
-    const pageNum = Math.max(1, parseInt(page as string, 10));
-    const limitNum = Math.min(60, Math.max(1, parseInt(limit as string, 10) || 24));
-    const skip = (pageNum - 1) * limitNum;
-
+    const parsedPage = parseInt(page as string, 10);
+    const pageNum = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
     const userRole = (req as { user?: { role?: string } }).user?.role;
     const isAdmin = userRole === 'ADMIN';
     const includeUnpublished = isAdmin && req.query.includeUnpublished === 'true';
+
+    // Admin paneli tüm kataloğu (taslaklar dahil) tek seferde yükler; vitrin istekleri 60 ile sınırlı kalır.
+    const maxLimit = includeUnpublished ? 1000 : 60;
+    const parsedLimit = parseInt(limit as string, 10);
+    const limitNum = Number.isFinite(parsedLimit) && parsedLimit >= 1 ? Math.min(maxLimit, parsedLimit) : 24;
+    const skip = (pageNum - 1) * limitNum;
 
     const cacheKey = `products:list:${pageNum}:${limitNum}:${category || ''}:${search || ''}:${minPrice || ''}:${maxPrice || ''}:${sort || ''}:${includeUnpublished}`;
 
@@ -44,12 +48,8 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
       const where: Prisma.ProductWhereInput = {};
       const andFilters: Prisma.ProductWhereInput[] = [];
 
-      if (!includeUnpublished) {
-        andFilters.push({
-          isPublished: true,
-          archivedAt: null,
-        });
-      }
+      // Silinen (arşivlenen) ürünler admin listesinde de gösterilmez; taslaklar yalnızca admin'e görünür
+      andFilters.push(includeUnpublished ? { archivedAt: null } : { isPublished: true, archivedAt: null });
 
       if (category && category !== 'all' && category !== 'hepsi') {
         const catParam = (category as string).trim();
@@ -302,66 +302,61 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       ? [colors.trim()]
       : [];
 
-    const savedProduct = await prisma.product.upsert({
+    const productData = {
+      name: name.trim(),
+      slug,
+      categoryId: catId,
+      description: description || '',
+      material: material || '',
+      dimensions: dimensions || '',
+      price: priceNum,
+      originalPrice: originalPrice ? parseFloat(String(originalPrice)) : null,
+      stock: stockNum,
+      inStock: stockNum > 0,
+      image: mainImage,
+      images: cleanImages,
+      features: Array.isArray(features) ? features : [],
+      colors: cleanColors,
+      badge: badge || null,
+      widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
+      heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
+      depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
+      drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
+      leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
+      vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
+      erpItemId: String(erpItemId),
+      erpItemCode: erpItemCode || null,
+      isPublished: targetPublish,
+    };
+
+    const existingProduct = await prisma.product.findUnique({
       where: { erpItemId: String(erpItemId) },
-      update: {
-        name: name.trim(),
-        categoryId: catId,
-        description: description || '',
-        material: material || '',
-        dimensions: dimensions || '',
-        price: priceNum,
-        originalPrice: originalPrice ? parseFloat(String(originalPrice)) : null,
-        stock: stockNum,
-        inStock: stockNum > 0,
-        image: mainImage,
-        images: cleanImages,
-        features: Array.isArray(features) ? features : [],
-        colors: cleanColors,
-        badge: badge || null,
-        widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
-        heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
-        depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
-        drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
-        leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
-        vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
-        isPublished: targetPublish,
-        erpItemCode: erpItemCode || null,
-        archivedAt: null,
-      },
-      create: {
-        name: name.trim(),
-        slug,
-        categoryId: catId,
-        description: description || '',
-        material: material || '',
-        dimensions: dimensions || '',
-        price: priceNum,
-        originalPrice: originalPrice ? parseFloat(String(originalPrice)) : null,
-        stock: stockNum,
-        inStock: stockNum > 0,
-        image: mainImage,
-        images: cleanImages,
-        features: Array.isArray(features) ? features : [],
-        colors: cleanColors,
-        badge: badge || null,
-        widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
-        heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
-        depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
-        drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
-        leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
-        vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
-        erpItemId: String(erpItemId),
-        erpItemCode: erpItemCode || null,
-        isPublished: targetPublish,
-      },
     });
+
+    // Aktif bir ürün varsa çift kayıt açılmaz.
+    if (existingProduct && !existingProduct.archivedAt) {
+      res.status(409).json({
+        success: false,
+        message: `Bu ERP ID (${erpItemId}) ile eşleşen bir ürün zaten mevcut: "${existingProduct.name}". Yeni ürün eklemek yerine mevcut ürünü güncelleyiniz.`,
+      });
+      return;
+    }
+
+    // Daha önce silinmiş (arşivlenmiş) ürün aynı ERP ID ile yeniden eklenirse kayıt geri getirilir ve yeni verilerle
+    // güncellenir. erpItemId UNIQUE olduğundan yeni kayıt açılamaz; önceden 409 dönüp admin'in göremediği arşivli
+    // ürünü işaret ediyordu. Slug korunur (eski bağlantılar çalışmaya devam eder).
+    const savedProduct = existingProduct
+      ? await prisma.product.update({
+          where: { id: existingProduct.id },
+          data: { ...productData, slug: existingProduct.slug, archivedAt: null, erpMissingSince: null },
+        })
+      : await prisma.product.create({ data: productData });
 
     await invalidateCachePattern('products:*');
 
     res.status(201).json({
       success: true,
-      message: 'Ürün başarıyla kaydedildi.',
+      message: existingProduct ? 'Daha önce silinmiş ürün geri getirildi ve güncellendi.' : 'Ürün başarıyla kaydedildi.',
       product: savedProduct,
     });
   } catch (error: unknown) {
@@ -382,11 +377,16 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    const cleanImages = body.images !== undefined
+    let cleanImages = body.images !== undefined
       ? (Array.isArray(body.images) ? body.images.filter((img: unknown) => typeof img === 'string' && img.trim().length > 0) : [])
-      : existing.images;
+      : [...existing.images];
 
     const mainImage = body.image !== undefined ? body.image : (cleanImages[0] || existing.image);
+
+    if (mainImage && !cleanImages.includes(mainImage)) {
+      cleanImages = [mainImage, ...cleanImages];
+    }
+
     const priceNum = body.price !== undefined ? parseFloat(String(body.price)) : Number(existing.price);
 
     const publishCandidate = body.isPublished !== undefined ? Boolean(body.isPublished) : existing.isPublished;
@@ -428,8 +428,8 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
         ...(body.price !== undefined && { price: priceNum }),
         ...(body.originalPrice !== undefined && { originalPrice: body.originalPrice ? parseFloat(String(body.originalPrice)) : null }),
         ...(body.stock !== undefined && { stock: parseInt(String(body.stock), 10), inStock: parseInt(String(body.stock), 10) > 0 }),
-        ...(body.image !== undefined && { image: mainImage }),
-        ...(body.images !== undefined && { images: cleanImages }),
+        ...(mainImage !== undefined && { image: mainImage }),
+        images: cleanImages,
         ...(body.features !== undefined && { features: Array.isArray(body.features) ? body.features : [] }),
         ...(cleanUpdateColors !== undefined && { colors: cleanUpdateColors }),
         ...(body.badge !== undefined && { badge: body.badge }),

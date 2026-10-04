@@ -11,6 +11,7 @@ import uploadRoutes from './upload.routes';
 import storeRoutes from './store.routes';
 import erpIntegrationRoutes from './erpIntegration.routes';
 import blogRoutes from './blog.routes';
+import contactRoutes from './contact.routes';
 
 const router = Router();
 
@@ -25,6 +26,11 @@ router.use('/cms', cmsRoutes);
 router.use('/upload', uploadRoutes);
 router.use('/stores', storeRoutes);
 router.use('/integration', erpIntegrationRoutes);
+router.use('/erp', erpIntegrationRoutes); // Alias for legacy/overview clients
+router.use('/admin/erp', erpIntegrationRoutes); // Alias for runbook & docs spec
+router.use('/admin/requests', requestRoutes); // Centralized admin route spec
+router.use('/admin/orders', orderRoutes); // Backward compatibility
 router.use('/blogs', blogRoutes);
+router.use('/contact', contactRoutes);
 
 export default router;

@@ -1,6 +1,7 @@
 import { prisma } from '../config/database';
 import { erpIntegrationService, ErpWebOrderInput } from '../services/erpIntegration.service';
 import { telegramService } from '../services/telegram.service';
+import { isCuratedErpId, isPermanentErpError, ErpPermanentError } from '../utils/erp';
 
 let outboxIntervalTimer: NodeJS.Timeout | null = null;
 let watchdogIntervalTimer: NodeJS.Timeout | null = null;
@@ -42,7 +43,16 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
 
   try {
     const erpItems = request.items.map((it) => {
-      const targetErpId = it.product?.erpItemId || it.erpItemCodeSnap || it.productId;
+      const targetErpId = it.product?.erpItemId || it.erpItemCodeSnap || it.product?.erpItemCode;
+      if (!targetErpId) {
+        throw new ErpPermanentError(`"${it.productNameSnap}" ürününün ERP Sistem ID (erpItemId) veya Kodu bulunamadı.`);
+      }
+      if (isCuratedErpId(targetErpId)) {
+        throw new ErpPermanentError(
+          `"${it.productNameSnap}" (${targetErpId}) web kürasyonu bir üründür, ERP'de karşılığı yoktur. ` +
+            `Satışı ERP'de manuel oluşturun veya ürünü gerçek bir ERP kalemiyle eşleştirip tekrar gönderin.`
+        );
+      }
       return {
         itemId: targetErpId,
         quantity: it.quantity,
@@ -63,7 +73,8 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
       phone1: request.customerPhone,
       email: request.customerEmail || 'talep@ermaymobilya.com',
       city: request.city,
-      district: request.district || undefined,
+      // ERP WebOrderDto'da district zorunlu (@IsNotEmpty); ilçesiz talepler kalıcı 400 ile reddedilmesin
+      district: request.district?.trim() || 'Belirtilmedi',
       address: request.addressLine || 'Mağazadan / WhatsApp Üzerinden Teslimat',
       orderNote: `Tercih: ${request.preference} | Talep: ${request.code}${storeNote}${customerNote}`,
       totalAmount: Number(request.subtotal),
@@ -101,7 +112,9 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
     const nextAttempts = request.erpAttempts + 1;
     const delayMinutes = Math.min(Math.pow(2, nextAttempts), 60);
     const nextAttemptAt = new Date(Date.now() + delayMinutes * 60 * 1000);
-    const isFinalFailure = nextAttempts >= 10;
+    // Kalıcı hatalar (ERP'de olmayan ürün, doğrulama hatası) 10 kez boşuna denenmez: hemen FAILED + alarm
+    const isPermanent = isPermanentErpError(err);
+    const isFinalFailure = isPermanent || nextAttempts >= 10;
 
     await prisma.$transaction(async (tx) => {
       await tx.orderRequest.update({
@@ -118,7 +131,7 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
         data: {
           requestId: request.id,
           type: 'ERP_SYNC_FAILED',
-          note: `ERP Senkronizasyon Hatası (${nextAttempts}. deneme): ${errorMsg}`,
+          note: `ERP Senkronizasyon Hatası (${nextAttempts}. deneme${isPermanent ? ', kalıcı hata - tekrar denenmeyecek' : ''}): ${errorMsg}`,
         },
       });
     });
@@ -153,7 +166,7 @@ export async function processErpOutboxBatch(): Promise<number> {
           "updatedAt" = NOW()
       WHERE id IN (
         SELECT id FROM "order_requests"
-        WHERE "erpSyncStatus" IN ('PENDING', 'FAILED')
+        WHERE "erpSyncStatus" = 'PENDING'  -- FAILED yalnızca admin'in manuel "tekrar gönder"i ile yeniden denenir
           AND "erpAttempts" < 10
           AND ("erpNextAttemptAt" IS NULL OR "erpNextAttemptAt" <= NOW())
           AND "erpSaleId" IS NULL
@@ -193,7 +206,8 @@ export async function runErpOutboxWatchdog(): Promise<number> {
   try {
     const result = await prisma.$executeRaw`
       UPDATE "order_requests"
-      SET "erpSyncStatus" = 'PENDING',
+      SET "erpAttempts" = "erpAttempts" + 1,
+          "erpSyncStatus" = CASE WHEN "erpAttempts" + 1 >= 10 THEN 'FAILED' ELSE 'PENDING' END,
           "erpLastError" = 'İşlem zaman aşımına uğradı, watchdog tarafından sıfırlandı.',
           "updatedAt" = NOW()
       WHERE "erpSyncStatus" = 'IN_PROGRESS'
@@ -201,7 +215,7 @@ export async function runErpOutboxWatchdog(): Promise<number> {
         AND "updatedAt" < NOW() - INTERVAL '10 minutes';
     `;
     if (result > 0) {
-      console.warn(`[ERP Outbox Watchdog] ${result} adet zaman aşımına uğramış talep tekrar PENDING kuyruğuna alındı.`);
+      console.warn(`[ERP Outbox Watchdog] ${result} adet zaman aşımına uğramış talep tekrar incelendi ve güncellendi.`);
     }
     return result;
   } catch (err) {
