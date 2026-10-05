@@ -12,6 +12,7 @@ import {
   optionalImageUrl,
   optionalEmail,
   phoneString,
+  trPhone,
   money,
   intRange,
   hexColor,
@@ -183,15 +184,7 @@ export const DeleteCategoryQuerySchema = z.object({ reassignTo: idString.optiona
 
 export const CreateContactMessageSchema = z.object({
   name: line(100, 2, 'Ad Soyad'),
-  phone: z
-    .string()
-    .trim()
-    .max(25, 'Telefon en fazla 25 karakter olabilir.')
-    .transform(normalizeTurkishPhone)
-    // Kurumsal müşteriler sabit hat / yurt dışı numarası da yazabilir (frontend ile aynı kural: 8-15 hane)
-    .refine((val) => /^[0-9+()\s-]+$/.test(val) && val.replace(/\D/g, '').length >= 8 && val.replace(/\D/g, '').length <= 15, {
-      message: 'Lütfen geçerli bir telefon numarası giriniz.',
-    }),
+  phone: trPhone(),
   email: optionalEmail.transform((v) => v ?? undefined),
   subject: line(150, 2, 'Konu').default('Genel İletişim'),
   message: z

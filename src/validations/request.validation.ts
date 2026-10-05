@@ -98,6 +98,7 @@ export const CreateOrderRequestSchema = z.object({
     .string({ required_error: 'Lütfen İletişim Telefonu alanını doldurunuz.' })
     .trim()
     .max(25, 'Telefon en fazla 25 karakter olabilir.')
+    .refine((v) => /^[0-9+()\s-]+$/.test(v), 'Telefon yalnız rakam içermelidir.')
     .transform(normalizeTurkishPhone)
     .refine((val) => /^\+905[0-9]{9}$/.test(val), {
       message: 'Lütfen geçerli bir Türkiye cep telefonu numarası giriniz (05XX XXX XX XX).',

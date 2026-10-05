@@ -153,17 +153,42 @@ app.use((req, res, next) => {
   next();
 });
 
-// 9. Resilient Rate Limiter (No bypass header, trusted client IP)
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300, // 300 requests per 15 minutes per IP
+// 9. Rate limits
+// Public catalogue reads (CMS, products, categories, stores, blog) are cheap and cached, and a single page view makes
+// several of them; writes are what needs protecting. A single global 300/15 min bucket made normal browsing hit 429,
+// and because server-side rendering calls come from the frontend server's address, every visitor's SSR shared one
+// bucket. Specific endpoints (login, order requests, contact, quote) keep their own stricter limiters.
+const isInternalRender = (req: express.Request): boolean => {
+  // Next.js server-side fetches: direct socket from a private/loopback address with no forwarded client address
+  const remote = req.socket.remoteAddress || '';
+  const privateAddr = /^(::1|127\.|::ffff:127\.|10\.|::ffff:10\.|192\.168\.|::ffff:192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::ffff:172\.(1[6-9]|2\d|3[01])\.)/.test(remote);
+  return privateAddr && !req.headers['x-forwarded-for'];
+};
+const isRead = (req: express.Request) => req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+const limitMessage = { success: false, message: 'Çok fazla istek gönderdiniz. Lütfen biraz sonra tekrar deneyiniz.' };
+
+const readLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600, // 600 reads / minute / client IP
   standardHeaders: true,
   legacyHeaders: false,
   validate: { trustProxy: false, xForwardedForHeader: false },
-  message: { success: false, message: 'Çok fazla istek gönderdiniz. Lütfen 15 dakika sonra tekrar deneyiniz.' },
+  skip: (req) => !isRead(req) || isInternalRender(req),
+  message: limitMessage,
 });
 
-app.use(limiter);
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300, // 300 writes / 15 minutes / client IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false, xForwardedForHeader: false },
+  skip: (req) => isRead(req),
+  message: limitMessage,
+});
+
+app.use(readLimiter);
+app.use(writeLimiter);
 
 // 10. Parsers
 app.use(express.json({ limit: '1mb' }));

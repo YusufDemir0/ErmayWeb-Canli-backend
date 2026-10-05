@@ -9,6 +9,8 @@ import {
   safeHref,
   line,
   ChangePasswordSchema,
+  CreateContactMessageSchema,
+  trPhone,
 } from '../src/validations';
 import { TURKEY_DISTRICTS } from '../src/validations/provinces';
 
@@ -121,5 +123,38 @@ describe('Validation: CMS', () => {
     const xss = { ...doc, sections: [...doc.sections, { id: 'c', type: 'cta', props: { title: 'x', buttons: [{ label: 'a', href: 'javascript:alert(1)' }] } }] };
     assert.equal(CMS_SCHEMAS.page_home.safeParse(xss).success, false, 'script link');
     assert.equal(CMS_SCHEMAS.page_corporate.safeParse({ sections: [{ id: 'h', type: 'hero', props: {} }] }).success, false, 'hero not allowed on corporate');
+  });
+});
+
+describe('Validation: Turkish phone numbers (E.164 +90)', () => {
+  test('normalises common spellings to +90XXXXXXXXXX', () => {
+    for (const raw of ['0532 419 41 51', '+90 532 419 41 51', '905324194151', '5324194151', '(0216) 365 00 00']) {
+      const r = trPhone().safeParse(raw);
+      assert.equal(r.success, true, raw);
+    }
+    const r = trPhone().safeParse('0532 419 41 51');
+    assert.equal(r.success && r.data, '+905324194151');
+  });
+  test('rejects letters, short numbers and foreign numbers', () => {
+    for (const bad of ['0532 abc 41 51', '532 419', '+1 202 555 0143', '+44 20 7946 0958', '0100 000 00 00']) {
+      assert.equal(trPhone().safeParse(bad).success, false, bad);
+    }
+  });
+  test('mobile-only fields reject landlines', () => {
+    assert.equal(trPhone({ mobile: true }).safeParse('0216 365 00 00').success, false);
+    assert.equal(trPhone({ mobile: true }).safeParse('0532 419 41 51').success, true);
+  });
+  test('stores and contact form use the rule', () => {
+    assert.equal(CreateStoreSchema.safeParse({ ...store, phone: '0532 41A 41 51' }).success, false);
+    const c = CreateContactMessageSchema.safeParse({ name: 'Ayşe Kaya', phone: '+1 202 555 0143', message: 'Merhaba, fiyat bilgisi rica ederim.' });
+    assert.equal(c.success, false);
+  });
+  test('CMS whatsapp is stored in wa.me digits', () => {
+    const r = CMS_SCHEMAS.contact.safeParse({ whatsapp: '0532 419 41 51', phone: '0216 365 00 00' });
+    assert.equal(r.success, true);
+    if (r.success) {
+      assert.equal((r.data as { whatsapp: string }).whatsapp, '905324194151');
+      assert.equal((r.data as { phone: string }).phone, '+902163650000');
+    }
   });
 });

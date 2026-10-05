@@ -1,5 +1,5 @@
 import { z, ZodTypeAny } from 'zod';
-import { line, multiline, imageUrl, safeHref, hexColor, intRange, slugString } from './common';
+import { line, multiline, imageUrl, safeHref, hexColor, intRange, slugString, optionalTrPhone, normalizeTrPhone } from './common';
 
 /**
  * CMS block validation.
@@ -16,6 +16,20 @@ const optHref = z.union([safeHref, z.literal('')]).optional().default('');
 
 // ── Simple blocks ────────────────────────────────────────────────────────────
 
+/** WhatsApp numarası wa.me biçiminde saklanır: "905324194151" (cep, ülke koduyla, + işaretsiz) */
+const waNumber = z
+  .union([
+    z.literal(''),
+    z
+      .string()
+      .trim()
+      .refine((v) => /^[0-9+()\s-]+$/.test(v), 'WhatsApp numarası yalnız rakam içermelidir.')
+      .transform((v) => normalizeTrPhone(v).replace('+', ''))
+      .refine((v) => /^905\d{9}$/.test(v), 'WhatsApp için cep numarası yazın (+90 5XX XXX XX XX).'),
+  ])
+  .optional()
+  .default('');
+
 const TickerItems = z.array(line(120, 1, 'Duyuru metni')).max(20, 'En fazla 20 duyuru eklenebilir.');
 
 const TickerStyle = z.object({
@@ -25,12 +39,12 @@ const TickerStyle = z.object({
 }).strict('Bilinmeyen alan.');
 
 const ContactInfo = z.object({
-  phone: optLine(25),
-  phoneSecondary: optLine(25),
-  fax: optLine(25),
+  phone: optionalTrPhone(),
+  phoneSecondary: optionalTrPhone(),
+  fax: optionalTrPhone(),
   email: z.union([z.string().trim().email('Geçerli bir e-posta giriniz.').max(150), z.literal('')]).optional().default(''),
   address: optText(300),
-  whatsapp: z.union([z.string().trim().regex(/^\+?[0-9\s]{10,16}$/, 'WhatsApp numarası yalnız rakam içermelidir.'), z.literal('')]).optional().default(''),
+  whatsapp: waNumber,
   showroom: optText(300),
   workingHours: optLine(120),
   instagram: optHref,
@@ -46,7 +60,7 @@ const SocialLinks = z.object({
   tiktok: optHref,
   pinterest: optHref,
   telegram: optHref,
-  whatsapp: z.union([z.string().trim().regex(/^\+?[0-9\s]{10,16}$/, 'WhatsApp numarası yalnız rakam içermelidir.'), z.literal('')]).optional().default(''),
+  whatsapp: waNumber,
 }).strict('Bilinmeyen alan.');
 
 const CampaignPopup = z.object({

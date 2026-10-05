@@ -208,7 +208,8 @@ export async function runErpOutboxWatchdog(): Promise<number> {
     const result = await prisma.$executeRaw`
       UPDATE "order_requests"
       SET "erpAttempts" = "erpAttempts" + 1,
-          "erpSyncStatus" = CASE WHEN "erpAttempts" + 1 >= 10 THEN 'FAILED' ELSE 'PENDING' END,
+          -- CASE metin döndürür; enum kolonuna açık tip dönüşümü gerekir (aksi halde 42804 datatype_mismatch)
+          "erpSyncStatus" = (CASE WHEN "erpAttempts" + 1 >= 10 THEN 'FAILED' ELSE 'PENDING' END)::"ErpSyncStatus",
           "erpLastError" = 'İşlem zaman aşımına uğradı, watchdog tarafından sıfırlandı.',
           "updatedAt" = NOW()
       WHERE "erpSyncStatus" = 'IN_PROGRESS'

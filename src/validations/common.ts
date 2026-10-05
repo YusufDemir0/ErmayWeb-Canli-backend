@@ -90,13 +90,36 @@ export const safeHref = z
 
 export const hexColor = z.string().trim().regex(/^#[0-9A-Fa-f]{6}$/, 'Renk #RRGGBB biçiminde olmalıdır.');
 
-export const phoneString = z
-  .string()
-  .trim()
-  .max(25, 'Telefon en fazla 25 karakter olabilir.')
-  .refine((v) => /^[0-9+()\s-]+$/.test(v) && v.replace(/\D/g, '').length >= 10 && v.replace(/\D/g, '').length <= 15, {
-    message: 'Geçerli bir telefon numarası giriniz.',
-  });
+/**
+ * Türkiye telefonu: girişi E.164'e normalize eder ("0532 419 41 51" -> "+905324194151") ve doğrular.
+ * Sabit hat 2xx–4xx, cep 5xx, kurumsal 850. Harf veya eksik hane kabul edilmez.
+ */
+export function normalizeTrPhone(raw: string): string {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.startsWith('90') && d.length > 10) d = d.slice(2);
+  if (d.startsWith('0')) d = d.slice(1);
+  return d.length === 10 ? `+90${d}` : String(raw || '').trim();
+}
+const TR_PHONE = /^\+90(?:[2-5]\d{9}|850\d{7})$/;
+const TR_MOBILE = /^\+905\d{9}$/;
+const PHONE_CHARS = /^[0-9+()\s-]*$/;
+
+export const trPhone = (opts: { mobile?: boolean } = {}) =>
+  z
+    .string()
+    .trim()
+    .max(25, 'Telefon en fazla 25 karakter olabilir.')
+    .refine((v) => PHONE_CHARS.test(v), 'Telefon yalnız rakam içermelidir.')
+    .transform(normalizeTrPhone)
+    .refine((v) => (opts.mobile ? TR_MOBILE : TR_PHONE).test(v), {
+      message: opts.mobile ? 'Geçerli bir cep telefonu yazın (+90 5XX XXX XX XX).' : 'Geçerli bir Türkiye telefon numarası yazın (+90 XXX XXX XX XX).',
+    });
+
+export const phoneString = trPhone();
+
+/** Boş bırakılabilen telefon: '' kalır, doluysa trPhone kuralı */
+export const optionalTrPhone = (opts: { mobile?: boolean } = {}) =>
+  z.union([z.literal(''), trPhone(opts)]).optional().default('');
 
 export const emailString = z.string().trim().max(150, 'E-posta en fazla 150 karakter olabilir.').email('Geçerli bir e-posta adresi giriniz.');
 
