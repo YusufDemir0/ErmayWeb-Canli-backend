@@ -66,6 +66,11 @@ describe('Validation: products and orders', () => {
     assert.equal(r.success, true);
     if (r.success) assert.equal(r.data.widthCm, null);
   });
+  test('empty original price stays empty (not coerced to 0)', () => {
+    const r = CreateProductSchema.safeParse({ ...product, originalPrice: null });
+    assert.equal(r.success, true);
+    if (r.success) assert.equal(r.data.originalPrice, null);
+  });
   test('rejects negative or 3-decimal prices and original price below price', () => {
     assert.equal(CreateProductSchema.safeParse({ ...product, price: -1 }).success, false);
     assert.equal(CreateProductSchema.safeParse({ ...product, price: 10.123 }).success, false);

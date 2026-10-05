@@ -323,8 +323,8 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       widthCm: widthCm ? parseInt(String(widthCm), 10) : null,
       heightCm: heightCm ? parseInt(String(heightCm), 10) : null,
       depthCm: depthCm ? parseInt(String(depthCm), 10) : null,
-      drawerCount: drawerCount !== undefined ? parseInt(String(drawerCount), 10) : 0,
-      leadTimeDays: leadTimeDays !== undefined ? parseInt(String(leadTimeDays), 10) : 15,
+      drawerCount: drawerCount != null ? Number(drawerCount) : null,
+      leadTimeDays: leadTimeDays != null ? Number(leadTimeDays) : null,
       vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
       erpItemId: String(erpItemId),
       erpItemCode: erpItemCode || null,
@@ -382,7 +382,8 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
       ? (Array.isArray(body.images) ? body.images.filter((img: unknown) => typeof img === 'string' && img.trim().length > 0) : [])
       : [...existing.images];
 
-    const mainImage = body.image !== undefined ? body.image : (cleanImages[0] || existing.image);
+    // Doğrulama boş görseli null'a çevirir; sütun boş metin bekler
+    const mainImage: string = body.image !== undefined ? body.image || cleanImages[0] || '' : cleanImages[0] || existing.image;
 
     if (mainImage && !cleanImages.includes(mainImage)) {
       cleanImages = [mainImage, ...cleanImages];
@@ -400,6 +401,18 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
     });
 
     const isPublished = publishCandidate && publishAllowed;
+
+    // Formlar kategoriyi id ya da adres (slug) olarak gönderebilir; ikisi de çözülür, bulunamazsa 400
+    let resolvedCategoryId: string | undefined = body.categoryId;
+    const categoryRef = typeof body.category === 'object' && body.category !== null ? body.category.id || body.category.slug : body.category;
+    if (!resolvedCategoryId && categoryRef) {
+      const found = await prisma.category.findFirst({ where: { OR: [{ id: String(categoryRef) }, { slug: String(categoryRef) }] }, select: { id: true } });
+      if (!found) {
+        res.status(400).json({ success: false, message: 'Seçilen kategori bulunamadı.', errors: [{ field: 'category', message: 'Seçilen kategori bulunamadı.' }] });
+        return;
+      }
+      resolvedCategoryId = found.id;
+    }
 
     const cleanUpdateColors = body.colors !== undefined
       ? (Array.isArray(body.colors)
@@ -422,7 +435,7 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
       where: { id },
       data: {
         ...(body.name && { name: body.name.trim() }),
-        ...(body.categoryId && { categoryId: body.categoryId }),
+        ...(resolvedCategoryId && { categoryId: resolvedCategoryId }),
         ...(body.description !== undefined && { description: body.description }),
         ...(body.material !== undefined && { material: body.material }),
         ...(body.dimensions !== undefined && { dimensions: body.dimensions }),
@@ -433,12 +446,12 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
         images: cleanImages,
         ...(body.features !== undefined && { features: Array.isArray(body.features) ? body.features : [] }),
         ...(cleanUpdateColors !== undefined && { colors: cleanUpdateColors }),
-        ...(body.badge !== undefined && { badge: body.badge }),
+        ...(body.badge !== undefined && { badge: body.badge || null }),
         ...(body.widthCm !== undefined && { widthCm: body.widthCm ? parseInt(String(body.widthCm), 10) : null }),
         ...(body.heightCm !== undefined && { heightCm: body.heightCm ? parseInt(String(body.heightCm), 10) : null }),
         ...(body.depthCm !== undefined && { depthCm: body.depthCm ? parseInt(String(body.depthCm), 10) : null }),
-        ...(body.drawerCount !== undefined && { drawerCount: parseInt(String(body.drawerCount), 10) }),
-        ...(body.leadTimeDays !== undefined && { leadTimeDays: parseInt(String(body.leadTimeDays), 10) }),
+        ...(body.drawerCount !== undefined && { drawerCount: body.drawerCount === null ? null : Number(body.drawerCount) }),
+        ...(body.leadTimeDays !== undefined && { leadTimeDays: body.leadTimeDays === null ? null : Number(body.leadTimeDays) }),
         ...(body.vatRate !== undefined && { vatRate: parseFloat(String(body.vatRate)) }),
         ...(body.erpItemCode !== undefined && { erpItemCode: body.erpItemCode }),
         isPublished,

@@ -84,7 +84,8 @@ const SetPiece = z.object({
 const ProductFields = z.object({
   name: line(150, 2, 'Ürün adı'),
   price: money.refine((v) => v > 0, 'Fiyat 0\'dan büyük olmalıdır.'),
-  originalPrice: z.union([money, z.literal(''), z.null()]).optional().transform((v) => (v === '' ? null : v)),
+  // null/'' önce denenir: z.coerce null'ı 0'a çevirirdi
+  originalPrice: z.union([z.null(), z.literal(''), money]).optional().transform((v) => (v === '' ? null : v)),
   categoryId: idString.optional(),
   category: z
     .union([

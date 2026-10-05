@@ -22,7 +22,7 @@ const TickerStyle = z.object({
   backgroundColor: hexColor,
   textColor: hexColor,
   speedSeconds: intRange(10, 120, 'Kayma süresi'),
-});
+}).strict('Bilinmeyen alan.');
 
 const ContactInfo = z.object({
   phone: optLine(25),
@@ -33,7 +33,8 @@ const ContactInfo = z.object({
   whatsapp: z.union([z.string().trim().regex(/^\+?[0-9\s]{10,16}$/, 'WhatsApp numarası yalnız rakam içermelidir.'), z.literal('')]).optional().default(''),
   showroom: optText(300),
   workingHours: optLine(120),
-});
+  instagram: optHref,
+}).strict('Bilinmeyen alan.');
 
 const SocialLinks = z.object({
   instagram: optHref,
@@ -44,7 +45,9 @@ const SocialLinks = z.object({
   twitter: optHref,
   tiktok: optHref,
   pinterest: optHref,
-});
+  telegram: optHref,
+  whatsapp: z.union([z.string().trim().regex(/^\+?[0-9\s]{10,16}$/, 'WhatsApp numarası yalnız rakam içermelidir.'), z.literal('')]).optional().default(''),
+}).strict('Bilinmeyen alan.');
 
 const CampaignPopup = z.object({
   enabled: z.boolean(),
@@ -56,7 +59,8 @@ const CampaignPopup = z.object({
   image: optImage,
   buttonText: optLine(40),
   buttonLink: optHref,
-});
+  description: optText(400),
+}).strict('Bilinmeyen alan.');
 
 const HeroSlide = z.object({
   id: z.string().trim().regex(/^[A-Za-z0-9_-]{1,40}$/),
