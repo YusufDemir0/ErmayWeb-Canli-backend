@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../config/database';
@@ -115,8 +116,7 @@ export async function quoteCart(req: Request, res: Response): Promise<void> {
       },
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Fiyat teklifi hesaplanamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Fiyat teklifi hesaplanamadı.');
   }
 }
 
@@ -348,9 +348,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
       status: createdRequest.status,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Sipariş talebi oluşturulamadı.';
-    logger.error('Order request create failed', errorFields(err));
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Sipariş talebi oluşturulamadı.', 'Order request create failed');
   }
 }
 
@@ -419,8 +417,7 @@ export async function getPublicReceipt(req: Request, res: Response): Promise<voi
       request: responseDto,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Fiş bilgisi getirilemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Fiş bilgisi getirilemedi.');
   }
 }
 
@@ -515,8 +512,7 @@ export async function getAdminRequests(req: AuthenticatedRequest, res: Response)
       },
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Talepler listelenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Talepler listelenemedi.');
   }
 }
 
@@ -577,8 +573,7 @@ export async function getAdminRequestById(req: AuthenticatedRequest, res: Respon
       request: mappedRequest,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Talep detayı alınamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Talep detayı alınamadı.');
   }
 }
 
@@ -703,8 +698,7 @@ export async function updateRequestStatus(req: AuthenticatedRequest, res: Respon
       res.status(409).json({ success: false, message: err.message });
       return;
     }
-    const msg = err instanceof Error ? err.message : 'Durum güncellenemedi.';
-    res.status(400).json({ success: false, message: msg });
+    sendServerError(res, err, 'Durum güncellenemedi.', 'Order request status update failed');
   }
 }
 
@@ -777,8 +771,7 @@ export async function retryErpSync(req: AuthenticatedRequest, res: Response): Pr
       message: 'ERP senkronizasyon talebi sıraya alındı ve arka planda işleme başlatıldı.',
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'ERP senkronizasyonu tetiklenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'ERP senkronizasyonu tetiklenemedi.');
   }
 }
 
@@ -791,7 +784,6 @@ export async function triggerDailySalesReport(_req: AuthenticatedRequest, res: R
     const result = await dailyReportService.generateAndSendDailyReport();
     res.status(200).json(result);
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Günlük rapor oluşturulamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Günlük rapor oluşturulamadı.');
   }
 }

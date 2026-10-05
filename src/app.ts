@@ -166,8 +166,8 @@ const limiter = rateLimit({
 app.use(limiter);
 
 // 10. Parsers
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb', parameterLimit: 200 }));
 
 // 11. High-Performance Static Media (Block Private Uploads from static root)
 app.use('/uploads/private', (_req, res) => {
@@ -235,19 +235,34 @@ app.use('/api/v1', routes);
 app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: `İstenen kaynak veya uç nokta bulunamadı: [${req.method}] ${req.originalUrl}`,
+    message: 'İstenen kaynak veya uç nokta bulunamadı.',
     requestId: req.headers['x-request-id'],
   });
 });
 
 // 14. Global Error Handler
-app.use((err: Error | unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+// Client errors raised by body parsers / multer (invalid JSON, payload too large, file too large) keep their 4xx status;
+// everything else is a 500 whose details stay in the log.
+app.use((err: Error | unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const requestId = req.headers['x-request-id'];
-  logger.error('Unhandled error', { ...errorFields(err), 'url.path': req.originalUrl.split('?')[0], 'http.request.method': req.method });
-  const msg = err instanceof Error ? err.message : 'Sunucu tarafında beklenmeyen bir hata oluştu.';
-  res.status(500).json({
-    success: false,
-    message: process.env.NODE_ENV === 'production' ? 'Sunucu tarafında beklenmeyen bir hata oluştu.' : msg,
-    requestId,
-  });
+  const e = err as { status?: number; statusCode?: number; type?: string; code?: string };
+  const status = e?.status || e?.statusCode;
+  const path = req.originalUrl.split('?')[0];
+  if (e?.type === 'entity.too.large' || e?.code === 'LIMIT_FILE_SIZE') {
+    logger.warn('Payload too large', { 'url.path': path, 'http.request.method': req.method });
+    res.status(413).json({ success: false, message: 'Gönderilen veri izin verilen boyutu aşıyor.', requestId });
+    return;
+  }
+  if (e?.type === 'entity.parse.failed') {
+    logger.info('Malformed JSON body', { 'url.path': path, 'http.request.method': req.method });
+    res.status(400).json({ success: false, message: 'İstek gövdesi geçerli JSON değil.', requestId });
+    return;
+  }
+  if (status && status >= 400 && status < 500) {
+    logger.info('Client error', { 'url.path': path, 'http.request.method': req.method, 'http.response.status_code': status });
+    res.status(status).json({ success: false, message: 'İstek işlenemedi.', requestId });
+    return;
+  }
+  logger.error('Unhandled error', { ...errorFields(err), 'url.path': path, 'http.request.method': req.method });
+  res.status(500).json({ success: false, message: 'Sunucu tarafında beklenmeyen bir hata oluştu.', requestId });
 });

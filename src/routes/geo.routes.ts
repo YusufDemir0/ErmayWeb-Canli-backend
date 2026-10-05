@@ -1,8 +1,11 @@
+import { sendServerError } from '../utils/httpError';
 import { Router, Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { prisma } from '../config/database';
 import { getOrSetCache, delCache } from '../utils/cache';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { validateRequest, validateQuery } from '../middlewares/validate.middleware';
+import * as V from '../validations';
 
 const router = Router();
 const inMemoryGeoCache = new Map<string, { data: unknown; timestamp: number }>();
@@ -51,8 +54,7 @@ router.get('/delivery-zones', async (_req: Request, res: Response): Promise<void
       data: zonesData,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Teslimat bölgeleri verisi alınamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Teslimat bölgeleri verisi alınamadı.');
   }
 });
 
@@ -61,7 +63,7 @@ router.get('/delivery-zones', async (_req: Request, res: Response): Promise<void
  * Update which cities are enabled/disabled for shipping & assembly.
  * Protected: Requires ADMIN role.
  */
-router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), async (req: Request, res: Response): Promise<void> => {
+router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), validateRequest(V.DeliveryZonesSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { disabledCityIds = [], disabledCityNames = [], noticeMessage = '' } = req.body;
 
@@ -99,12 +101,11 @@ router.put('/delivery-zones', authenticateToken, authorizeRoles('ADMIN'), async 
       zones: savedBlock.content,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Teslimat bölgeleri güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Teslimat bölgeleri güncellenemedi.');
   }
 });
 
-router.get('/reverse', reverseGeoLimiter, async (req: Request, res: Response): Promise<void> => {
+router.get('/reverse', reverseGeoLimiter, validateQuery(V.ReverseGeoQuerySchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { lat, lng } = req.query;
 
@@ -151,8 +152,7 @@ router.get('/reverse', reverseGeoLimiter, async (req: Request, res: Response): P
 
     res.status(200).json({ success: true, data, cached: false });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Geocoding işlemi başarısız.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Geocoding işlemi başarısız.');
   }
 });
 

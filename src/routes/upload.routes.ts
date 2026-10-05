@@ -1,9 +1,10 @@
+import { sendServerError } from '../utils/httpError';
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { authenticateToken } from '../middlewares/auth.middleware';
+import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
 
 const publicUploadsDir = path.join(__dirname, '../../uploads');
 const privateUploadsDir = path.join(__dirname, '../../uploads/private');
@@ -64,7 +65,7 @@ import sharp from 'sharp';
 const router = Router();
 
 // Upload Route with Authentication, Magic Byte Verification, WebP Optimization & SHA-256 Deduplication
-router.post('/', authenticateToken, upload.single('file'), async (req: Request, res: Response): Promise<void> => {
+router.post('/', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), upload.single('file'), async (req: Request, res: Response): Promise<void> => {
   try {
     if (!req.file || !req.file.buffer) {
       res.status(400).json({ success: false, message: 'Lütfen geçerli bir dosya seçin.' });
@@ -127,13 +128,12 @@ router.post('/', authenticateToken, upload.single('file'), async (req: Request, 
       isPrivate,
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Dosya yükleme başarısız.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Dosya yükleme başarısız.');
   }
 });
 
 // Authenticated Private File Retrieval (KVKK & Financial Document Protection)
-router.get('/private/:fileName', authenticateToken, (req: Request, res: Response): void => {
+router.get('/private/:fileName', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), (req: Request, res: Response): void => {
   try {
     const rawParam = req.params.fileName;
     const fileName = path.basename(Array.isArray(rawParam) ? rawParam[0] : (rawParam || '')); // Prevent path traversal

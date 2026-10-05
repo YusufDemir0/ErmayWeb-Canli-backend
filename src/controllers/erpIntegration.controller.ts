@@ -1,3 +1,5 @@
+import { sendServerError } from '../utils/httpError';
+import { ErpSaleWebhookSchema } from '../validations';
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../config/database';
@@ -16,12 +18,7 @@ export async function getErpCatalog(_req: Request, res: Response): Promise<void>
       catalog,
     });
   } catch (error: unknown) {
-    const errorMsg = error instanceof Error ? error.message : 'ERP ürün kataloğu alınamadı.';
-    logger.error('ERP catalog fetch failed', errorFields(error));
-    res.status(500).json({
-      success: false,
-      message: errorMsg,
-    });
+    sendServerError(res, error, 'ERP ürün kataloğu alınamadı.', 'ERP catalog fetch failed');
   }
 }
 
@@ -51,12 +48,7 @@ export async function triggerManualCatalogSync(_req: Request, res: Response): Pr
       report,
     });
   } catch (error: unknown) {
-    const errorMsg = error instanceof Error ? error.message : 'Katalog senkronizasyonu başarısız oldu.';
-    logger.error('Manual catalog sync failed', errorFields(error));
-    res.status(500).json({
-      success: false,
-      message: errorMsg,
-    });
+    sendServerError(res, error, 'Katalog senkronizasyonu başarısız oldu.', 'Manual catalog sync failed');
   }
 }
 
@@ -115,7 +107,12 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
       return;
     }
 
-    const { saleCode, saleId, externalRef, status } = req.body;
+    const parsed = ErpSaleWebhookSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ success: false, message: 'Webhook gövdesi geçersiz.' });
+      return;
+    }
+    const { saleCode, saleId, externalRef, status } = parsed.data;
 
     if (!saleCode && !saleId && !externalRef) {
       res.status(400).json({ success: false, message: 'saleCode, saleId veya externalRef eksik.' });
@@ -129,7 +126,7 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
       if (!approvedStatuses.includes(normalizedStatus)) {
         res.status(200).json({
           success: true,
-          message: `ERP webhook durumu (${status}) onaylı durumlar arasında olmadığından talep durumu güncellenmedi.`,
+          message: 'ERP webhook durumu onaylı durumlar arasında olmadığından talep durumu güncellenmedi.',
         });
         return;
       }

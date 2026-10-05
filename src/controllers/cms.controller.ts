@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { telegramService } from '../services/telegram.service';
@@ -38,8 +39,7 @@ export async function getCmsBlock(req: Request, res: Response): Promise<void> {
     res.status(200).json({ success: true, key: block.key, content: block.content });
   } catch (error: unknown) {
     logger.error('CMS block read failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'CMS verisi alınamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'CMS verisi alınamadı.');
   }
 }
 
@@ -60,8 +60,7 @@ export async function getAllCmsBlocks(req: Request, res: Response): Promise<void
 
     res.status(200).json({ success: true, cms: result });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Tüm CMS içerikleri alınamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Tüm CMS içerikleri alınamadı.');
   }
 }
 
@@ -106,8 +105,7 @@ export async function updateCmsBlock(req: Request, res: Response): Promise<void>
     });
   } catch (error: unknown) {
     logger.error('CMS block update failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'CMS bloğu güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'CMS bloğu güncellenemedi.');
   }
 }
 
@@ -117,8 +115,7 @@ export async function testTelegramConnection(req: Request, res: Response): Promi
     const result = await telegramService.sendTestMessage(botToken, chatId);
     res.status(result.success ? 200 : 400).json(result);
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Telegram test işlemi başarısız.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Telegram test işlemi başarısız.');
   }
 }
 

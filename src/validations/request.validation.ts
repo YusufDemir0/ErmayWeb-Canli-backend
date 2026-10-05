@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { RequestStatus } from '@prisma/client';
+import { TURKEY_PROVINCE_NAMES, isDistrictOf } from './provinces';
+
+const productRef = z.string({ required_error: 'Ürün ID (productId) zorunludur.' }).trim().regex(/^[A-Za-z0-9_-]{1,160}$/, 'Geçersiz ürün.');
+const shortOpt = (max: number) => z.string().trim().max(max).optional().nullable();
 
 /**
  * Normalizes Turkish phone numbers to E.164 format (+905XXXXXXXXX).
@@ -59,8 +63,8 @@ export const QuoteCartSchema = z.object({
   items: z
     .array(
       z.object({
-        productId: z.string({ required_error: 'Ürün ID (productId) zorunludur.' }).min(1),
-        colorKey: z.string().optional().nullable(),
+        productId: productRef,
+        colorKey: shortOpt(60),
         quantity: z.coerce.number().int().min(1, 'Miktar en az 1 olmalıdır.').max(20, 'En fazla 20 adet seçilebilir.').default(1),
       })
     )
@@ -77,9 +81,9 @@ export const CreateOrderRequestSchema = z.object({
   items: z
     .array(
       z.object({
-        productId: z.string({ required_error: 'Ürün ID (productId) zorunludur.' }).min(1),
-        colorKey: z.string().optional().nullable(),
-        colorLabel: z.string().optional().nullable(),
+        productId: productRef,
+        colorKey: shortOpt(60),
+        colorLabel: shortOpt(60),
         quantity: z.coerce.number().int().min(1, 'Miktar en az 1 olmalıdır.').max(20, 'En fazla 20 adet seçilebilir.').default(1),
       })
     )
@@ -93,6 +97,7 @@ export const CreateOrderRequestSchema = z.object({
   customerPhone: z
     .string({ required_error: 'Lütfen İletişim Telefonu alanını doldurunuz.' })
     .trim()
+    .max(25, 'Telefon en fazla 25 karakter olabilir.')
     .transform(normalizeTurkishPhone)
     .refine((val) => /^\+905[0-9]{9}$/.test(val), {
       message: 'Lütfen geçerli bir Türkiye cep telefonu numarası giriniz (05XX XXX XX XX).',
@@ -100,21 +105,18 @@ export const CreateOrderRequestSchema = z.object({
   customerEmail: z
     .string()
     .trim()
+    .max(150, 'E-posta en fazla 150 karakter olabilir.')
     .email('Geçerli bir e-posta adresi giriniz.')
     .optional()
     .nullable()
     .or(z.literal('')),
-  city: z
-    .string({ required_error: 'Lütfen il seçiniz veya giriniz.' })
-    .trim()
-    .min(2, 'Şehir adı en az 2 karakter olmalıdır.')
-    .max(50, 'Şehir adı en fazla 50 karakter olabilir.'),
+  city: z.enum(TURKEY_PROVINCE_NAMES, { errorMap: () => ({ message: 'Lütfen listeden bir il seçiniz.' }) }),
   district: z.string().trim().max(50).optional().nullable(),
   addressLine: z.string().trim().max(255).optional().nullable(),
   preference: z.enum(['WHATSAPP', 'STORE_VISIT'], {
     required_error: 'Lütfen talep tamamlama tercihinizi seçiniz (WhatsApp veya Mağaza).',
   }),
-  preferredStoreId: z.string().optional().nullable(),
+  preferredStoreId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/, 'Geçersiz mağaza.').optional().nullable(),
   note: z.string().trim().max(500, 'Not en fazla 500 karakter olabilir.').optional().nullable(),
   kvkkNoticeAcknowledged: z.boolean({
     required_error: 'KVKK Aydınlatma Metni onayı zorunludur.',
@@ -122,7 +124,10 @@ export const CreateOrderRequestSchema = z.object({
     message: 'Lütfen KVKK Aydınlatma Metni\'ni okuyup onaylayınız.',
   }),
   marketingConsent: z.boolean().optional().default(false),
-  website: z.string().optional(), // Honeypot (bot tuzağı)
+  website: z.string().max(200).optional(), // Honeypot (bot tuzağı)
+}).refine((v) => !v.district || isDistrictOf(v.city, v.district), {
+  message: 'İlçe seçilen ile ait değil. Listeden seçiniz.',
+  path: ['district'],
 });
 
 export type CreateOrderRequestInput = z.infer<typeof CreateOrderRequestSchema>;
@@ -136,7 +141,7 @@ export const UpdateOrderRequestStatusSchema = z.object({
   }),
   note: z.string().trim().max(500, 'Not en fazla 500 karakter olabilir.').optional().nullable(),
   staffNote: z.string().trim().max(500, 'Not en fazla 500 karakter olabilir.').optional().nullable(),
-  assignedToId: z.string().optional().nullable(),
+  assignedToId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/, 'Geçersiz kullanıcı.').optional().nullable(),
 });
 
 export type UpdateOrderRequestStatusInput = z.infer<typeof UpdateOrderRequestStatusSchema>;

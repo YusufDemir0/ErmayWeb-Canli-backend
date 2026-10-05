@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
@@ -362,8 +363,7 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
     });
   } catch (error: unknown) {
     logger.error('Product create failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'Ürün oluşturulamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Ürün oluşturulamadı.');
   }
 }
 
@@ -450,8 +450,7 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
     res.status(200).json({ success: true, message: 'Ürün güncellendi.', product: updated });
   } catch (error: unknown) {
     logger.error('Product update failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'Ürün güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Ürün güncellenemedi.');
   }
 }
 
@@ -476,8 +475,7 @@ export async function deleteProduct(req: Request, res: Response): Promise<void> 
     res.status(200).json({ success: true, message: 'Ürün arşive kaldırıldı (Soft Delete).' });
   } catch (error: unknown) {
     logger.error('Product delete failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'Ürün silinemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Ürün silinemedi.');
   }
 }
 
@@ -596,7 +594,6 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
     });
   } catch (error: unknown) {
     logger.error('Bulk category link failed', errorFields(error));
-    const msg = error instanceof Error ? error.message : 'Toplu eşleme yapılırken bir hata oluştu.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Toplu eşleme yapılırken bir hata oluştu.');
   }
 }

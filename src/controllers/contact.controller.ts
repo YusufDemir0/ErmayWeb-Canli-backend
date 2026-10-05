@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
@@ -86,8 +87,7 @@ export async function getContactMessages(req: Request, res: Response): Promise<v
       totalPages: Math.ceil(total / limitNum) || 1,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Mesajlar listelenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Mesajlar listelenemedi.');
   }
 }
 
@@ -113,7 +113,6 @@ export async function setContactMessageHandled(req: Request, res: Response): Pro
 
     res.status(200).json({ success: true, message: handled ? 'Mesaj ilgilenildi olarak işaretlendi.' : 'Mesaj tekrar açıldı.', contactMessage: updated });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Mesaj güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, err, 'Mesaj güncellenemedi.');
   }
 }

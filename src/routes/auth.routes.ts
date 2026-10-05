@@ -15,8 +15,9 @@ import {
 } from '../controllers/auth.controller';
 import rateLimit from 'express-rate-limit';
 import { authenticateToken } from '../middlewares/auth.middleware';
-import { validateRequest } from '../middlewares/validate.middleware';
 import { LoginSchema, RegisterSchema } from '../validations';
+import { validateRequest, validateQuery, validateParams } from '../middlewares/validate.middleware';
+import * as V from '../validations';
 
 const router = Router();
 
@@ -37,7 +38,7 @@ router.post('/register', validateRequest(RegisterSchema), register);
 router.post('/login', loginLimiter, validateRequest(LoginSchema), login);
 router.post('/logout', logout);
 router.get('/profile', authenticateToken, getProfile);
-router.post('/change-password', authenticateToken, changePassword);
+router.post('/change-password', authenticateToken, validateRequest(V.ChangePasswordSchema), changePassword);
 
 // Address Management Endpoints
 router.get('/addresses', authenticateToken, getAddresses);

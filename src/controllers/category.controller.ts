@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
@@ -87,8 +88,7 @@ export async function createCategory(req: Request, res: Response): Promise<void>
 
     res.status(201).json({ success: true, message: 'Kategori eklendi.', category });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Kategori eklenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Kategori eklenemedi.');
   }
 }
 
@@ -153,8 +153,7 @@ export async function updateCategory(req: Request, res: Response): Promise<void>
 
     res.status(200).json({ success: true, message: 'Kategori güncellendi.', category });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Kategori güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Kategori güncellenemedi.');
   }
 }
 
@@ -228,8 +227,7 @@ export async function reorderCategories(req: Request, res: Response): Promise<vo
       categories: updatedCategories,
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Sıralama güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Sıralama güncellenemedi.');
   }
 }
 
@@ -318,7 +316,6 @@ export async function deleteCategory(req: Request, res: Response): Promise<void>
         : 'Kategori başarıyla silindi.',
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Kategori silinemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Kategori silinemedi.');
   }
 }

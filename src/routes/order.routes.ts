@@ -10,14 +10,16 @@ import {
 } from '../controllers/orderRequest.controller';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
 import { requestCreateLimiter, publicReceiptLimiter } from '../middlewares/rateLimiters';
+import { validateRequest, validateQuery, validateParams } from '../middlewares/validate.middleware';
+import * as V from '../validations';
 
 const router = Router();
 
 // ==========================================
 // Customer Endpoints (Backward compatibility)
 // ==========================================
-router.post('/', requestCreateLimiter, createOrderRequest);
-router.get('/public/:token', publicReceiptLimiter, getPublicReceipt);
+router.post('/', requestCreateLimiter, validateRequest(V.CreateOrderRequestSchema), createOrderRequest);
+router.get('/public/:token', publicReceiptLimiter, validateParams(V.TokenParamSchema), getPublicReceipt);
 
 // Kapalı uç noktalar
 router.get('/track/:orderNumber', (_req, res) => {
@@ -39,10 +41,10 @@ router.post('/:id/receipt', (_req, res) => {
 // ==========================================
 // Admin Endpoints
 // ==========================================
-router.get('/all', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), getAdminRequests);
-router.get('/:id', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), getAdminRequestById);
-router.patch('/:id/status', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), updateRequestStatus);
-router.post('/:id/retry-erp', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), retryErpSync);
+router.get('/all', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), validateQuery(V.RequestListQuerySchema), getAdminRequests);
+router.get('/:id', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), validateParams(V.IdParamSchema), getAdminRequestById);
+router.patch('/:id/status', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), validateParams(V.IdParamSchema), validateRequest(V.UpdateOrderRequestStatusSchema), updateRequestStatus);
+router.post('/:id/retry-erp', authenticateToken, authorizeRoles('ADMIN', 'STAFF'), validateParams(V.IdParamSchema), retryErpSync);
 router.post('/daily-report', authenticateToken, authorizeRoles('ADMIN'), triggerDailySalesReport);
 
 export default router;

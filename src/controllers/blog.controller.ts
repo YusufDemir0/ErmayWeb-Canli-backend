@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
@@ -60,8 +61,7 @@ export async function getBlogPosts(req: Request, res: Response): Promise<void> {
       },
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Blog yazıları getirilemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Blog yazıları getirilemedi.');
   }
 }
 
@@ -87,8 +87,7 @@ export async function getBlogPostBySlug(req: Request, res: Response): Promise<vo
 
     res.status(200).json({ success: true, post });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Blog detayı alınamadı.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Blog detayı alınamadı.');
   }
 }
 
@@ -134,8 +133,7 @@ export async function createBlogPost(req: Request, res: Response): Promise<void>
 
     res.status(201).json({ success: true, message: 'Blog yazısı başarıyla oluşturuldu.', post });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Blog yazısı eklenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Blog yazısı eklenemedi.');
   }
 }
 
@@ -180,8 +178,7 @@ export async function updateBlogPost(req: Request, res: Response): Promise<void>
 
     res.status(200).json({ success: true, message: 'Blog yazısı güncellendi.', post: updated });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Blog yazısı güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Blog yazısı güncellenemedi.');
   }
 }
 
@@ -203,7 +200,6 @@ export async function deleteBlogPost(req: Request, res: Response): Promise<void>
 
     res.status(200).json({ success: true, message: 'Blog yazısı başarıyla silindi.' });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Blog yazısı silinemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Blog yazısı silinemedi.');
   }
 }

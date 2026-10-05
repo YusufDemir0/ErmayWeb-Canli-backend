@@ -6,12 +6,14 @@ import {
   handleErpSaleApprovedWebhook,
 } from '../controllers/erpIntegration.controller';
 import { authenticateToken, authorizeRoles } from '../middlewares/auth.middleware';
+import { validateRequest, validateQuery, validateParams } from '../middlewares/validate.middleware';
+import * as V from '../validations';
 
 const router = Router();
 
 // Catalog and product sync endpoints (Protected: Admin Only)
 router.get('/catalog', authenticateToken, authorizeRoles('ADMIN'), getErpCatalog);
-router.post('/sync', authenticateToken, authorizeRoles('ADMIN'), syncProduct);
+router.post('/sync', authenticateToken, authorizeRoles('ADMIN'), validateRequest(V.ErpSyncSchema), syncProduct);
 router.post('/sync-now', authenticateToken, authorizeRoles('ADMIN'), triggerManualCatalogSync);
 
 // Webhook endpoint called by ERP when sale is approved (Protected: x-integration-key constant-time)

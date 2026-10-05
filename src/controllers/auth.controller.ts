@@ -1,3 +1,4 @@
+import { sendServerError } from '../utils/httpError';
 import { Request, Response } from 'express';
 import { AuthenticatedRequest } from '../middlewares/auth.middleware';
 import { prisma } from '../config/database';
@@ -77,9 +78,7 @@ export async function login(req: Request, res: Response): Promise<void> {
       },
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Giriş yapılırken bir hata oluştu.';
-    logger.error('Login failed with server error', errorFields(error));
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Giriş yapılırken bir hata oluştu.', 'Login failed with server error');
   }
 }
 
@@ -132,8 +131,7 @@ export async function getProfile(req: AuthenticatedRequest, res: Response): Prom
       user: adminUser,
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Profil yüklenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Profil yüklenemedi.');
   }
 }
 
@@ -181,8 +179,7 @@ export async function changePassword(req: AuthenticatedRequest, res: Response): 
 
     res.status(200).json({ success: true, message: 'Şifreniz başarıyla güncellendi.' });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Şifre güncellenemedi.';
-    res.status(500).json({ success: false, message: msg });
+    sendServerError(res, error, 'Şifre güncellenemedi.');
   }
 }
 
