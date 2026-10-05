@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { normalizeTurkishPhone } from './request.validation';
+import { TURKEY_PROVINCE_NAMES } from './provinces';
 
 export const LoginSchema = z.object({
   email: z.string().optional(),
@@ -112,3 +113,48 @@ export * from './request.validation';
 export { CreateOrderRequestSchema as CreateOrderSchema } from './request.validation';
 export { UpdateOrderRequestStatusSchema as UpdateOrderStatusSchema } from './request.validation';
 
+
+// ── Mağaza / bayi ─────────────────────────────────────────────────────────────
+// İl serbest metin değil: 81 ilden biri olmalı (admin panelinde seçim listesiyle girilir)
+const optionalText = (max: number) =>
+  z.union([z.string().trim().max(max), z.null()]).optional().transform((v) => (v === '' ? null : v));
+const imagePath = z
+  .union([z.string().trim().max(500).regex(/^(\/(?!\/)|https:\/\/)/, 'Görsel adresi site içi bir yol (/...) ya da https:// ile başlamalıdır.'), z.literal(''), z.null()])
+  .optional()
+  .transform((v) => (v === '' ? null : v));
+
+export const CreateStoreSchema = z.object({
+  name: z.string().trim().min(2, 'Mağaza adı en az 2 karakter olmalıdır.').max(120),
+  city: z.enum(TURKEY_PROVINCE_NAMES, { errorMap: () => ({ message: 'Geçerli bir il seçiniz.' }) }),
+  district: optionalText(60),
+  address: z.string().trim().min(5, 'Adres en az 5 karakter olmalıdır.').max(300),
+  phone: z
+    .string()
+    .trim()
+    .refine((v) => /^[0-9+()\s-]+$/.test(v) && v.replace(/\D/g, '').length >= 10 && v.replace(/\D/g, '').length <= 15, {
+      message: 'Geçerli bir telefon numarası giriniz.',
+    }),
+  email: z.union([z.string().trim().email('Geçerli bir e-posta giriniz.'), z.literal(''), z.null()]).optional().transform((v) => (v === '' ? null : v)),
+  hours: optionalText(200),
+  image: imagePath,
+  mapUrl: z
+    .union([z.string().trim().url('Harita bağlantısı geçerli bir adres olmalıdır.').max(1000), z.literal(''), z.null()])
+    .optional()
+    .transform((v) => (v === '' ? null : v)),
+  isActive: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).max(10000).optional(),
+});
+export const UpdateStoreSchema = CreateStoreSchema.partial();
+
+// ── Blog ──────────────────────────────────────────────────────────────────────
+export const CreateBlogPostSchema = z.object({
+  title: z.string().trim().min(3, 'Başlık en az 3 karakter olmalıdır.').max(200),
+  summary: optionalText(500),
+  content: z.string().trim().min(1, 'İçerik zorunludur.').max(100_000),
+  coverImage: imagePath,
+  category: optionalText(80),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  author: optionalText(80),
+  isPublished: z.boolean().optional(),
+});
+export const UpdateBlogPostSchema = CreateBlogPostSchema.partial();

@@ -16,6 +16,7 @@ import { Prisma, RequestStatus, RequestPreference } from '@prisma/client';
 import { normalizeTurkishText } from '../utils/slug';
 import { dailyReportService } from '../services/dailyReport.service';
 import { invalidateCachePattern } from '../utils/cache';
+import { logger, errorFields } from '../utils/logger';
 
 /**
  * Generate unique immutable order request code: WEB-YYMM-XXXX
@@ -337,7 +338,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
         district: data.district || undefined,
         itemCount: resolvedItems.length,
       })
-      .catch((tgErr) => console.warn('Telegram bildirim hatası:', tgErr));
+      .catch((tgErr) => logger.warn('Telegram notification failed', errorFields(tgErr)));
 
     res.status(201).json({
       success: true,
@@ -348,7 +349,7 @@ export async function createOrderRequest(req: Request, res: Response): Promise<v
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Sipariş talebi oluşturulamadı.';
-    console.error('Create Order Request Error:', err);
+    logger.error('Order request create failed', errorFields(err));
     res.status(500).json({ success: false, message: msg });
   }
 }
@@ -767,7 +768,7 @@ export async function retryErpSync(req: AuthenticatedRequest, res: Response): Pr
       try {
         await syncSingleRequestToErp(requestId);
       } catch (syncErr) {
-        console.error(`[retryErpSync] Arka plan senkronizasyon hatası (Talep ID: ${requestId}):`, syncErr);
+        logger.error('ERP retry sync failed', { 'order_request.id': requestId, ...errorFields(syncErr) });
       }
     });
 

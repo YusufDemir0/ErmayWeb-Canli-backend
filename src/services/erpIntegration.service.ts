@@ -7,6 +7,7 @@ import { slugifyTurkish } from '../utils/slug';
 import { invalidateCachePattern } from '../utils/cache';
 import type { Product } from '@prisma/client';
 import { ErpHttpError } from '../utils/erp';
+import { logger, errorFields } from '../utils/logger';
 
 export interface ErpItem {
   id: string;
@@ -218,10 +219,7 @@ export class ErpIntegrationService {
     try {
       erpItems = await this.fetchErpItems();
     } catch (err: unknown) {
-      console.warn(
-        '[ErpIntegrationService] ERP API çevrimdışı veya erişilemiyor, yerel ürün kataloğu fallback olarak kullanılıyor:',
-        err instanceof Error ? err.message : err
-      );
+      logger.warn('ERP API unreachable, using local catalog fallback', errorFields(err));
     }
 
     const webProducts = await prisma.product.findMany({
@@ -379,7 +377,7 @@ export class ErpIntegrationService {
         });
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`ERP image update warning: ${msg}`);
+        logger.warn('ERP image update failed', { 'error.message': msg });
       }
     }
 

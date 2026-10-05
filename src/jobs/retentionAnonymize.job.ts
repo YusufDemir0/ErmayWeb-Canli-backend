@@ -1,4 +1,5 @@
 import { prisma } from '../config/database';
+import { logger, errorFields } from '../utils/logger';
 
 const ADVISORY_LOCK_ID = 42002;
 const RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -31,11 +32,11 @@ export async function runRetentionAnonymization(): Promise<RetentionReport | nul
 
         const acquired = lockResult?.[0]?.acquired ?? false;
         if (!acquired) {
-          console.log('[RetentionJob] Başka bir instance veri anonimleştirme işini yürütüyor (Advisory Lock meşgul).');
+          logger.info('Retention job skipped: another instance holds the lock');
           return null;
         }
 
-        console.log(`[RetentionJob] ${RETENTION_DAYS} günden eski (${cutoffDate.toISOString()}) tamamlanan/iptal/spam talepler taranıyor...`);
+        logger.info('Retention job started', { 'retention.days': RETENTION_DAYS, 'retention.cutoff': cutoffDate.toISOString() });
 
         const eligibleRequests = await tx.orderRequest.findMany({
           where: {
@@ -74,7 +75,7 @@ export async function runRetentionAnonymization(): Promise<RetentionReport | nul
         }
 
         const durationMs = Date.now() - startTime;
-        console.log(`[RetentionJob] Tamamlandı (${durationMs}ms): ${anonymizedCount} talep anonimleştirildi.`);
+        logger.audit('order_request.anonymized', 'success', { 'retention.anonymized_count': anonymizedCount, 'event.duration': durationMs * 1e6 });
 
         return {
           anonymizedCount,
@@ -85,7 +86,7 @@ export async function runRetentionAnonymization(): Promise<RetentionReport | nul
       { timeout: 60000 }
     );
   } catch (err: unknown) {
-    console.error('[RetentionJob] Anonimleştirme hatası:', err);
+    logger.error('Retention job failed', errorFields(err));
     return null;
   }
 }
@@ -98,7 +99,7 @@ export function startRetentionJob(): void {
     return;
   }
 
-  console.log('[RetentionJob] Günlük KVKK veri anonimleştirme işi kuruldu (180 gün kuralı).');
+  logger.info('Retention job scheduled', { 'retention.days': 180 });
 
   const tick = async () => {
     if (isJobRunning) return;
@@ -106,7 +107,7 @@ export function startRetentionJob(): void {
     try {
       await runRetentionAnonymization();
     } catch (err) {
-      console.error('[RetentionJob] Döngü hatası:', err);
+      logger.error('Retention job tick failed', errorFields(err));
     } finally {
       isJobRunning = false;
     }
@@ -127,6 +128,6 @@ export function stopRetentionJob(): void {
   if (retentionTimer) {
     clearInterval(retentionTimer);
     retentionTimer = null;
-    console.log('[RetentionJob] Veri anonimleştirme işi durduruldu.');
+    logger.info('Retention job stopped');
   }
 }

@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
@@ -9,6 +8,7 @@ import crypto from 'crypto';
 import routes from './routes';
 import { prisma } from './config/database';
 import { imageOptimizerMiddleware } from './middlewares/imageOptimizer.middleware';
+import { logger, errorFields, requestContext } from './utils/logger';
 
 export const app = express();
 
@@ -89,28 +89,69 @@ app.use((req, res, next) => {
   next();
 });
 
-// 7. Traceability: Request ID Middleware
+// 7. Traceability: request id (header'dan gelirse güvenli biçimdeyse kullanılır) + istek bağlamı (AsyncLocalStorage)
+const SAFE_REQUEST_ID = /^[A-Za-z0-9._:-]{8,100}$/;
 app.use((req, res, next) => {
-  const requestId = (req.headers['x-request-id'] as string) || `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const incoming = req.headers['x-request-id'];
+  const requestId =
+    typeof incoming === 'string' && SAFE_REQUEST_ID.test(incoming)
+      ? incoming
+      : `req_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   req.headers['x-request-id'] = requestId;
   res.setHeader('X-Request-Id', requestId);
+  requestContext.run({ requestId }, () => next());
+});
+
+// 8. Structured HTTP access log (ECS fields). Client IP is truncated (last IPv4 octet / IPv6 lower bits) for KVKK/GDPR.
+const maskIp = (ip: string): string => {
+  if (ip.includes('.')) return ip.replace(/\.\d+$/, '.0');
+  if (ip.includes(':')) return `${ip.split(':').slice(0, 4).join(':')}::`;
+  return ip;
+};
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on('finish', () => {
+    if (req.path === '/health') return;
+    const durationNs = Number(process.hrtime.bigint() - start);
+    const status = res.statusCode;
+    const fields = {
+      'event.category': ['web'],
+      'event.duration': durationNs,
+      'http.request.method': req.method,
+      'url.path': req.originalUrl.split('?')[0],
+      'http.response.status_code': status,
+      'http.response.body.bytes': Number(res.getHeader('content-length')) || undefined,
+      'client.ip_prefix': maskIp(req.ip || req.socket.remoteAddress || '-'),
+    };
+    const msg = `${req.method} ${fields['url.path']} ${status}`;
+    if (status >= 500) logger.error(msg, fields);
+    else if (status >= 400) logger.warn(msg, fields);
+    else logger.info(msg, fields);
+  });
   next();
 });
 
-// 8. Structured HTTP Request Logging with Request ID and Client IP
-morgan.token('req-id', (req: express.Request) => (req.headers['x-request-id'] as string) || '-');
-morgan.token('real-ip', (req: express.Request) => {
-  const ip = req.ip || req.socket.remoteAddress || '-';
-  if (ip.includes('.')) {
-    return ip.replace(/\.\d+$/, '.0'); // Zero out last octet for IPv4
-  }
-  if (ip.includes(':')) {
-    const parts = ip.split(':');
-    return parts.slice(0, 4).join(':') + '::'; // Mask lower bits for IPv6
-  }
-  return ip;
+// 8b. Audit trail: every state-changing API call (create/update/delete/login) is recorded once it completes.
+// Action names are derived from the route: POST /api/v1/stores -> "stores.create", PATCH .../status -> "requests.update".
+const AUDIT_VERB: Record<string, string> = { POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete' };
+const AUDIT_SKIP = new Set(['/api/v1/requests/quote', '/api/v1/cart/quote', '/api/v1/orders/quote']);
+app.use((req, res, next) => {
+  const verb = AUDIT_VERB[req.method];
+  const path = req.originalUrl.split('?')[0];
+  if (!verb || !path.startsWith('/api/v1/') || AUDIT_SKIP.has(path)) return next();
+  res.on('finish', () => {
+    const segments = path.replace('/api/v1/', '').split('/').filter(Boolean);
+    const resource = segments[0] || 'unknown';
+    const action =
+      resource === 'auth' && segments[1] ? `auth.${segments[1].replace(/-/g, '_')}` : `${resource}.${verb}`;
+    logger.audit(action, res.statusCode < 400 ? 'success' : 'failure', {
+      'url.path': path,
+      'http.request.method': req.method,
+      'http.response.status_code': res.statusCode,
+    });
+  });
+  next();
 });
-app.use(morgan('[:date[iso]] [:req-id] [:real-ip] :method :url :status :response-time ms - :res[content-length]'));
 
 // 9. Resilient Rate Limiter (No bypass header, trusted client IP)
 const limiter = rateLimit({
@@ -202,7 +243,7 @@ app.use((req, res) => {
 // 14. Global Error Handler
 app.use((err: Error | unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   const requestId = req.headers['x-request-id'];
-  console.error(`[ERROR] [${requestId}] Unhandled System Error:`, err);
+  logger.error('Unhandled error', { ...errorFields(err), 'url.path': req.originalUrl.split('?')[0], 'http.request.method': req.method });
   const msg = err instanceof Error ? err.message : 'Sunucu tarafında beklenmeyen bir hata oluştu.';
   res.status(500).json({
     success: false,

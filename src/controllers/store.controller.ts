@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { getOrSetCache, delCache } from '../utils/cache';
+import { logger, errorFields } from '../utils/logger';
 
 const STORES_CACHE_TTL = 3600; // 1 hour
 
@@ -28,7 +29,7 @@ export async function getStores(req: Request, res: Response): Promise<void> {
     const stores = await getOrSetCache(cacheKey, STORES_CACHE_TTL, async () => {
       return prisma.store.findMany({
         where: includeInactive ? {} : { isActive: true },
-        orderBy: { createdAt: 'asc' },
+        orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
       });
     });
 
@@ -37,7 +38,7 @@ export async function getStores(req: Request, res: Response): Promise<void> {
       stores,
     });
   } catch (error: unknown) {
-    console.error('Mağaza Listeleme Hatası:', error);
+    logger.error('Store list failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Mağazalar yüklenemedi.' });
   }
 }
@@ -66,7 +67,7 @@ export async function createStore(req: Request, res: Response): Promise<void> {
         address: String(address).trim(),
         phone: String(phone).trim(),
         email: email ? String(email).trim() : null,
-        hours: hours ? String(hours).trim() : 'Haftanın her günü 09:00 - 20:00',
+        hours: hours ? String(hours).trim() : null,
         image: image || null,
         mapUrl: mapUrl || null,
         isActive: sanitizedIsActive,
@@ -81,7 +82,7 @@ export async function createStore(req: Request, res: Response): Promise<void> {
       store,
     });
   } catch (error: unknown) {
-    console.error('Mağaza Ekleme Hatası:', error);
+    logger.error('Store create failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Mağaza eklenemedi.' });
   }
 }
@@ -128,7 +129,7 @@ export async function updateStore(req: Request, res: Response): Promise<void> {
       store,
     });
   } catch (error: unknown) {
-    console.error('Mağaza Güncelleme Hatası:', error);
+    logger.error('Store update failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Mağaza güncellenemedi.' });
   }
 }
@@ -173,7 +174,7 @@ export async function deleteStore(req: Request, res: Response): Promise<void> {
       message: 'Mağaza başarıyla silindi.',
     });
   } catch (error: unknown) {
-    console.error('Mağaza Silme Hatası:', error);
+    logger.error('Store delete failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Mağaza silinemedi.' });
   }
 }

@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { prisma } from '../config/database';
 import { telegramService } from '../services/telegram.service';
 import { getOrSetCache, delCache } from '../utils/cache';
+import { logger, errorFields } from '../utils/logger';
 
 const CMS_ALL_CACHE_KEY = 'cms:all';
 const CMS_CACHE_TTL = 3600; // 1 hour
@@ -36,7 +37,7 @@ export async function getCmsBlock(req: Request, res: Response): Promise<void> {
 
     res.status(200).json({ success: true, key: block.key, content: block.content });
   } catch (error: unknown) {
-    console.error('CMS Get Block Error:', error);
+    logger.error('CMS block read failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'CMS verisi alınamadı.';
     res.status(500).json({ success: false, message: msg });
   }
@@ -104,7 +105,7 @@ export async function updateCmsBlock(req: Request, res: Response): Promise<void>
       block: updatedBlock,
     });
   } catch (error: unknown) {
-    console.error('CMS Update Error:', error);
+    logger.error('CMS block update failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'CMS bloğu güncellenemedi.';
     res.status(500).json({ success: false, message: msg });
   }

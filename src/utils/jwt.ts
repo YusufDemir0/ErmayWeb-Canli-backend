@@ -1,10 +1,11 @@
 import jwt from 'jsonwebtoken';
+import { logger, errorFields } from './logger';
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
-      console.error('FATAL: JWT_SECRET ortam değişkeni tanımlanmamıştır! Sunucu güvenlik sebebiyle durduruluyor.');
+      logger.error('JWT_SECRET is not set; refusing to start');
       process.exit(1);
     }
     return 'ermayweb_dev_only_secret_key_2026';

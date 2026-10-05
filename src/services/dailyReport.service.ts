@@ -1,5 +1,6 @@
 import { prisma } from '../config/database';
 import { telegramService } from './telegram.service';
+import { logger, errorFields } from '../utils/logger';
 
 export class DailyReportService {
   /**
@@ -90,7 +91,7 @@ export class DailyReportService {
 
         await telegramService.sendMessage(lines.join('\n'));
       } catch (tgErr) {
-        console.warn('Telegram daily digest notification error:', tgErr);
+        logger.warn('Telegram daily digest failed', errorFields(tgErr));
       }
 
       return {
@@ -100,7 +101,7 @@ export class DailyReportService {
       };
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Günlük rapor oluşturulamadı.';
-      console.error('Daily Report Generation Error:', error);
+      logger.error('Daily report generation failed', errorFields(error));
       return { success: false, message: msg };
     }
   }

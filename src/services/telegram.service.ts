@@ -1,4 +1,5 @@
-/**
+
+import { logger, errorFields } from '../utils/logger';/**
  * Telegram Bot Notification Service
  * Sends masked, KVKK-compliant notifications to Telegram without customer PII (Finding N8).
  */
@@ -84,7 +85,7 @@ export class TelegramService {
 
       return response.ok;
     } catch (err) {
-      console.warn('Telegram API send warning:', err);
+      logger.warn('Telegram API send failed', errorFields(err));
       return false;
     }
   }

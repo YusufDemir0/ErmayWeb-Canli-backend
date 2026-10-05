@@ -4,6 +4,7 @@ import { prisma } from '../config/database';
 import { hashPassword, comparePassword } from '../utils/password';
 import { generateToken } from '../utils/jwt';
 import { AdminRole } from '@prisma/client';
+import { logger, errorFields } from '../utils/logger';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -77,7 +78,7 @@ export async function login(req: Request, res: Response): Promise<void> {
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : 'Giriş yapılırken bir hata oluştu.';
-    console.error('Login error:', error);
+    logger.error('Login failed with server error', errorFields(error));
     res.status(500).json({ success: false, message: msg });
   }
 }

@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 import { CreateContactMessageSchema } from '../validations';
 import { telegramService } from '../services/telegram.service';
+import { logger, errorFields } from '../utils/logger';
 
 /**
  * POST /api/v1/contact
@@ -40,11 +41,11 @@ export async function createContactMessage(req: Request, res: Response): Promise
 
     telegramService
       .notifyNewContactMessage({ subject: data.subject })
-      .catch((tgErr) => console.warn('Telegram bildirim hatası:', tgErr));
+      .catch((tgErr) => logger.warn('Telegram notification failed', errorFields(tgErr)));
 
     res.status(201).json({ success: true, message: 'Mesajınız alındı.' });
   } catch (err: unknown) {
-    console.error('Create Contact Message Error:', err);
+    logger.error('Contact message create failed', errorFields(err));
     res.status(500).json({ success: false, message: 'Mesajınız iletilemedi. Lütfen daha sonra tekrar deneyiniz.' });
   }
 }

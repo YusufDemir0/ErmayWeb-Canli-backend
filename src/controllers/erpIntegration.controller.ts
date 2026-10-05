@@ -5,6 +5,7 @@ import { erpIntegrationService } from '../services/erpIntegration.service';
 import { runCatalogSync } from '../jobs/erpCatalogSync.job';
 import { invalidateCachePattern } from '../utils/cache';
 import { RequestStatus, PaymentChannel } from '@prisma/client';
+import { logger, errorFields } from '../utils/logger';
 
 export async function getErpCatalog(_req: Request, res: Response): Promise<void> {
   try {
@@ -16,7 +17,7 @@ export async function getErpCatalog(_req: Request, res: Response): Promise<void>
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'ERP ürün kataloğu alınamadı.';
-    console.error('ERP Catalog Error:', error);
+    logger.error('ERP catalog fetch failed', errorFields(error));
     res.status(500).json({
       success: false,
       message: errorMsg,
@@ -51,7 +52,7 @@ export async function triggerManualCatalogSync(_req: Request, res: Response): Pr
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'Katalog senkronizasyonu başarısız oldu.';
-    console.error('Manual Catalog Sync Error:', error);
+    logger.error('Manual catalog sync failed', errorFields(error));
     res.status(500).json({
       success: false,
       message: errorMsg,
@@ -88,7 +89,7 @@ export async function syncProduct(req: Request, res: Response): Promise<void> {
     });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'Ürün senkronizasyonu başarısız oldu.';
-    console.error('ERP Sync Error:', error);
+    logger.error('ERP product sync failed', errorFields(error));
     res.status(400).json({
       success: false,
       message: errorMsg,
@@ -203,7 +204,7 @@ export async function handleErpSaleApprovedWebhook(req: Request, res: Response):
       message: 'ERP Satış onayı başarıyla işlendi.',
     });
   } catch (error: unknown) {
-    console.error('ERP Webhook Error:', error);
+    logger.error('ERP webhook processing failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Webhook işlenirken hata oluştu.' });
   }
 }

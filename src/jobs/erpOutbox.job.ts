@@ -2,6 +2,7 @@ import { prisma } from '../config/database';
 import { erpIntegrationService, ErpWebOrderInput } from '../services/erpIntegration.service';
 import { telegramService } from '../services/telegram.service';
 import { isCuratedErpId, isPermanentErpError, ErpPermanentError } from '../utils/erp';
+import { logger, errorFields } from '../utils/logger';
 
 let outboxIntervalTimer: NodeJS.Timeout | null = null;
 let watchdogIntervalTimer: NodeJS.Timeout | null = null;
@@ -143,7 +144,7 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
           attempts: nextAttempts,
           error: errorMsg,
         })
-        .catch((tgErr) => console.warn('Telegram bildirim hatası:', tgErr));
+        .catch((tgErr) => logger.warn('Telegram notification failed', errorFields(tgErr)));
     }
 
     return { success: false, message: errorMsg };
@@ -185,13 +186,13 @@ export async function processErpOutboxBatch(): Promise<number> {
       try {
         await syncSingleRequestToErp(row.id);
       } catch (itemErr) {
-        console.error(`[ERP Outbox] Hata (Request ID: ${row.id}):`, itemErr);
+        logger.error('ERP outbox: request export failed', { 'event.action': 'erp.outbox_export', 'order_request.id': row.id, ...errorFields(itemErr) });
       }
     }
 
     return lockedRows.length;
   } catch (batchErr) {
-    console.error('[ERP Outbox] Toplu işleme hatası:', batchErr);
+    logger.error('ERP outbox: batch failed', { 'event.action': 'erp.outbox_export', ...errorFields(batchErr) });
     return 0;
   } finally {
     isProcessing = false;
@@ -215,11 +216,11 @@ export async function runErpOutboxWatchdog(): Promise<number> {
         AND "updatedAt" < NOW() - INTERVAL '10 minutes';
     `;
     if (result > 0) {
-      console.warn(`[ERP Outbox Watchdog] ${result} adet zaman aşımına uğramış talep tekrar incelendi ve güncellendi.`);
+      logger.warn('ERP outbox watchdog requeued stale requests', { 'erp.requeued_count': result });
     }
     return result;
   } catch (err) {
-    console.error('[ERP Outbox Watchdog] Hata:', err);
+    logger.error('ERP outbox watchdog failed', errorFields(err));
     return 0;
   }
 }
@@ -237,21 +238,21 @@ export function startErpOutboxWorker(): void {
     clearInterval(watchdogIntervalTimer);
   }
 
-  console.log(`⏱️ ERP Outbox Worker aktif edildi (Periyot: ${intervalMs / 1000}s).`);
+  logger.info('ERP outbox worker started', { 'job.interval_seconds': intervalMs / 1000 });
 
   // İlk çalıştırma (5 saniye gecikmeyle, sunucu ayağa kalktıktan sonra)
   setTimeout(() => {
-    processErpOutboxBatch().catch((err) => console.error('[ERP Outbox Initial] Hata:', err));
+    processErpOutboxBatch().catch((err) => logger.error('ERP outbox initial run failed', errorFields(err)));
   }, 5000);
 
   // Periyodik Outbox kontrolü
   outboxIntervalTimer = setInterval(() => {
-    processErpOutboxBatch().catch((err) => console.error('[ERP Outbox] Hata:', err));
+    processErpOutboxBatch().catch((err) => logger.error('ERP outbox run failed', errorFields(err)));
   }, intervalMs);
 
   // Periyodik Watchdog (Her 10 dakikada bir)
   watchdogIntervalTimer = setInterval(() => {
-    runErpOutboxWatchdog().catch((err) => console.error('[ERP Watchdog] Hata:', err));
+    runErpOutboxWatchdog().catch((err) => logger.error('ERP outbox watchdog run failed', errorFields(err)));
   }, 10 * 60 * 1000);
 }
 
@@ -267,5 +268,5 @@ export function stopErpOutboxWorker(): void {
     clearInterval(watchdogIntervalTimer);
     watchdogIntervalTimer = null;
   }
-  console.log('⏹️ ERP Outbox Worker durduruldu.');
+  logger.info('ERP outbox worker stopped');
 }

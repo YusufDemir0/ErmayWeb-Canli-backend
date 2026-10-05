@@ -4,6 +4,7 @@ import { canPublishProduct } from '../controllers/product.controller';
 import { invalidateCachePattern } from '../utils/cache';
 import { telegramService } from '../services/telegram.service';
 import { isCuratedErpId } from '../utils/erp';
+import { logger, errorFields } from '../utils/logger';
 
 const ADVISORY_LOCK_ID = 42001;
 const SYNC_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
@@ -86,7 +87,7 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
     erpItems = await erpIntegrationService.fetchErpItems(true);
     report.totalErpItems = erpItems.length;
   } catch (err: unknown) {
-    console.error('[CatalogSync] ERP API ürün listesi alınamadı:', err);
+    logger.error('Catalog sync: ERP product list unavailable', { 'event.action': 'erp.catalog_sync', ...errorFields(err) });
     report.aborted = true;
     report.abortReason = `ERP ürün listesi alınamadı: ${err instanceof Error ? err.message : String(err)}`;
     report.errors++;
@@ -105,13 +106,13 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
   // 2. Toplu yayından kaldırma kalkanı: ERP'nin hatalı/eksik bir yanıtı tüm kataloğu boşaltmasın.
   const guardReason = await checkMassUnpublishGuard(erpMap);
   if (guardReason) {
-    console.error(`[CatalogSync] DURDURULDU: ${guardReason}`);
+    logger.error('Catalog sync aborted by safety guard', { 'event.action': 'erp.catalog_sync', 'event.reason': guardReason });
     report.aborted = true;
     report.abortReason = guardReason;
     report.durationMs = Date.now() - startTime;
     telegramService
       .notifyCatalogSyncAborted({ reason: guardReason })
-      .catch((tgErr) => console.warn('Telegram bildirim hatası:', tgErr));
+      .catch((tgErr) => logger.warn('Telegram notification failed', errorFields(tgErr)));
     return report;
   }
 
@@ -124,11 +125,11 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
         `;
         const acquired = lockResult?.[0]?.acquired ?? false;
         if (!acquired) {
-          console.log('[CatalogSync] Başka bir instance katalog senkronizasyonunu yürütüyor (Advisory Lock meşgul).');
+          logger.info('Catalog sync skipped: another instance holds the lock', { 'event.action': 'erp.catalog_sync' });
           return null;
         }
 
-        console.log('[CatalogSync] 15 dakikalık ERP katalog senkronizasyonu başlatıldı...');
+        logger.info('Catalog sync started', { 'event.action': 'erp.catalog_sync' });
 
         // 2. Fetch all non-archived products from ErmayWeb DB
         const dbProducts = await tx.product.findMany({
@@ -258,12 +259,17 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
     const changesMade = Boolean(syncSuccess);
 
     report.durationMs = Date.now() - startTime;
-    console.log(
-      `[CatalogSync] Tamamlandı (${report.durationMs}ms): ${report.matchedProducts}/${report.totalErpItems} ERP eşleşti, ` +
-      `${report.pricesUpdated} fiyat güncellendi, ${report.stocksUpdated} stok güncellendi, ` +
-      `${report.restoredItems} web kürasyonlu ürün korundu/onarıldı, ` +
-      `${report.unpublishedMissing} eksik ERP ürünü yayından çekildi.`
-    );
+    logger.info('Catalog sync finished', {
+      'event.action': 'erp.catalog_sync',
+      'event.outcome': 'success',
+      'event.duration': report.durationMs * 1e6,
+      'erp.items_total': report.totalErpItems,
+      'erp.items_matched': report.matchedProducts,
+      'erp.prices_updated': report.pricesUpdated,
+      'erp.stocks_updated': report.stocksUpdated,
+      'erp.items_restored': report.restoredItems,
+      'erp.items_unpublished': report.unpublishedMissing,
+    });
 
     // Yalnızca veritabanında gerçekten değişiklik yapıldıysa ürün cache'ini düşür (V-19)
     if (changesMade) {
@@ -273,7 +279,7 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
     return report;
   } catch (err: unknown) {
     report.errors++;
-    console.error('[CatalogSync] Senkronizasyon sırasında beklenmeyen hata:', err);
+    logger.error('Catalog sync failed', { 'event.action': 'erp.catalog_sync', 'event.outcome': 'failure', ...errorFields(err) });
     return report;
   }
 }
@@ -283,11 +289,11 @@ export async function runCatalogSync(): Promise<CatalogSyncReport | null> {
  */
 export function startCatalogSyncJob(): void {
   if (syncTimer) {
-    console.log('[CatalogSync] İş zaten çalışıyor.');
+    logger.debug('Catalog sync job already scheduled');
     return;
   }
 
-  console.log('[CatalogSync] 15 dakikalık periyodik katalog senkronizasyon işi kuruldu.');
+  logger.info('Catalog sync job scheduled', { 'job.interval_minutes': 15 });
 
   const tick = async () => {
     if (isJobRunning) return;
@@ -295,7 +301,7 @@ export function startCatalogSyncJob(): void {
     try {
       await runCatalogSync();
     } catch (err) {
-      console.error('[CatalogSync] Döngü hatası:', err);
+      logger.error('Catalog sync tick failed', errorFields(err));
     } finally {
       isJobRunning = false;
     }
@@ -316,6 +322,6 @@ export function stopCatalogSyncJob(): void {
   if (syncTimer) {
     clearInterval(syncTimer);
     syncTimer = null;
-    console.log('[CatalogSync] Katalog senkronizasyon işi durduruldu.');
+    logger.info('Catalog sync job stopped');
   }
 }

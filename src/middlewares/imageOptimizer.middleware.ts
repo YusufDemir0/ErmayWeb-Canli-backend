@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import sharp from 'sharp';
+import { logger, errorFields } from '../utils/logger';
 
 const uploadsDir = path.join(__dirname, '../../uploads');
 const cacheDir = path.join(uploadsDir, '.optimized');
@@ -10,7 +11,7 @@ if (!fs.existsSync(cacheDir)) {
   try {
     fs.mkdirSync(cacheDir, { recursive: true });
   } catch (err) {
-    console.warn('Cache directory could not be created:', err);
+    logger.warn('Image cache directory could not be created', errorFields(err));
   }
 }
 
@@ -89,7 +90,7 @@ export async function imageOptimizerMiddleware(req: Request, res: Response, next
 
     // Asynchronously write to disk cache
     fs.writeFile(cachedFilePath, optimizedBuffer, (err) => {
-      if (err) console.warn('[IMAGE OPTIMIZER CACHE WRITE ERROR]', err.message);
+      if (err) logger.warn('Image cache write failed', errorFields(err));
     });
 
     res.setHeader('Content-Type', 'image/webp');
@@ -98,7 +99,7 @@ export async function imageOptimizerMiddleware(req: Request, res: Response, next
     res.setHeader('X-Image-Optimized', 'processed');
     res.send(optimizedBuffer);
   } catch (err: unknown) {
-    console.warn('[IMAGE OPTIMIZER FALLBACK TO STATIC]', (err as Error).message);
+    logger.warn('Image optimizer fell back to static file', errorFields(err));
     next();
   }
 }

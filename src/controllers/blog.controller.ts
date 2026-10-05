@@ -125,7 +125,7 @@ export async function createBlogPost(req: Request, res: Response): Promise<void>
         coverImage: coverImage || null,
         category: category || 'Dekorasyon & Tasarım',
         tags: Array.isArray(tags) ? tags : [],
-        author: author || 'Ermay Mobilya Mimari Ekibi',
+        author: author || 'Ermay Mobilya',
         readTimeMin,
         isPublished: isPublished !== undefined ? Boolean(isPublished) : true,
         publishedAt: new Date(),

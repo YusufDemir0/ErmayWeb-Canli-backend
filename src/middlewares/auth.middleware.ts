@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyToken, JwtPayload } from '../utils/jwt';
 import { prisma } from '../config/database';
+import { requestContext } from '../utils/logger';
 
 export interface AuthenticatedRequest extends Request {
   user?: JwtPayload;
@@ -62,6 +63,12 @@ export async function authenticateToken(req: AuthenticatedRequest, res: Response
       ...decoded,
       role: adminUser.role,
     };
+    // Log bağlamına kullanıcı kimliği (kişisel veri değil, UUID) ve rolü eklenir
+    const ctx = requestContext.getStore();
+    if (ctx) {
+      ctx.userId = String(decoded.userId);
+      ctx.userRole = adminUser.role;
+    }
     next();
   } catch (error) {
     res.status(401).json({ success: false, message: 'Geçersiz veya süresi dolmuş token. Lütfen tekrar giriş yapınız.' });

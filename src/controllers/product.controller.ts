@@ -4,6 +4,7 @@ import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
 import { getOrSetCache, invalidateCachePattern } from '../utils/cache';
 import { erpIntegrationService } from '../services/erpIntegration.service';
+import { logger, errorFields } from '../utils/logger';
 
 /**
  * Tek ve merkezi yayınlanabilirlik kuralı (canPublish).
@@ -159,7 +160,7 @@ export async function getProducts(req: Request, res: Response): Promise<void> {
       ...cachedResult,
     });
   } catch (error: unknown) {
-    console.error('Ürün Listeleme Hatası:', error);
+    logger.error('Product list failed', errorFields(error));
     res.status(500).json({ success: false, message: 'Ürünler yüklenirken bir sorun oluştu.' });
   }
 }
@@ -360,7 +361,7 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       product: savedProduct,
     });
   } catch (error: unknown) {
-    console.error('Ürün Oluşturma Hatası:', error);
+    logger.error('Product create failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'Ürün oluşturulamadı.';
     res.status(500).json({ success: false, message: msg });
   }
@@ -448,7 +449,7 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
 
     res.status(200).json({ success: true, message: 'Ürün güncellendi.', product: updated });
   } catch (error: unknown) {
-    console.error('Ürün Güncelleme Hatası:', error);
+    logger.error('Product update failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'Ürün güncellenemedi.';
     res.status(500).json({ success: false, message: msg });
   }
@@ -474,7 +475,7 @@ export async function deleteProduct(req: Request, res: Response): Promise<void> 
 
     res.status(200).json({ success: true, message: 'Ürün arşive kaldırıldı (Soft Delete).' });
   } catch (error: unknown) {
-    console.error('Ürün Silme Hatası:', error);
+    logger.error('Product delete failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'Ürün silinemedi.';
     res.status(500).json({ success: false, message: msg });
   }
@@ -594,7 +595,7 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
       categoryId: targetCat.id,
     });
   } catch (error: unknown) {
-    console.error('Toplu Kategori Eşleme Hatası:', error);
+    logger.error('Bulk category link failed', errorFields(error));
     const msg = error instanceof Error ? error.message : 'Toplu eşleme yapılırken bir hata oluştu.';
     res.status(500).json({ success: false, message: msg });
   }
