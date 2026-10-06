@@ -1,5 +1,5 @@
 import { prisma } from '../config/database';
-import { erpIntegrationService, ErpWebOrderInput } from '../services/erpIntegration.service';
+import { erpIntegrationService, ErpWebOrderInput, ErpOrderItemInput } from '../services/erpIntegration.service';
 import { telegramService } from '../services/telegram.service';
 import { isCuratedErpId, isPermanentErpError, ErpPermanentError } from '../utils/erp';
 import { logger, errorFields } from '../utils/logger';
@@ -43,23 +43,27 @@ export async function syncSingleRequestToErp(requestId: string): Promise<{ succe
   }
 
   try {
-    const erpItems = request.items.map((it) => {
+    const erpItems = request.items.map((it): ErpOrderItemInput => {
       const targetErpId = it.product?.erpItemId || it.erpItemCodeSnap || it.product?.erpItemCode;
       if (!targetErpId) {
         throw new ErpPermanentError(`"${it.productNameSnap}" ürününün ERP Sistem ID (erpItemId) veya Kodu bulunamadı.`);
       }
-      if (isCuratedErpId(targetErpId)) {
-        throw new ErpPermanentError(
-          `"${it.productNameSnap}" (${targetErpId}) web kürasyonu bir üründür, ERP'de karşılığı yoktur. ` +
-            `Satışı ERP'de manuel oluşturun veya ürünü gerçek bir ERP kalemiyle eşleştirip tekrar gönderin.`
-        );
-      }
-      return {
-        itemId: targetErpId,
+      const line = {
         quantity: it.quantity,
         price: Number(it.unitPriceSnap),
-        name: it.productNameSnap,
+        name: [it.productNameSnap, it.colorLabel].filter(Boolean).join(' - '),
       };
+      if (isCuratedErpId(targetErpId)) {
+        // ERP'de karşılığı yok: admin deneme ürün kabul ettiyse onunla gönder (gerçek ad satır açıklamasına yazılır)
+        if (it.product?.erpPlaceholder && it.product.erpPlaceholderAckAt) {
+          return { ...line, placeholder: it.product.erpPlaceholder };
+        }
+        throw new ErpPermanentError(
+          `"${it.productNameSnap}" (${targetErpId}) web kürasyonu bir üründür, ERP'de karşılığı yoktur. ` +
+            `Ürün düzenleme ekranında deneme ürün seçip kabul edin ya da ürünü gerçek bir ERP kalemiyle eşleştirip tekrar gönderin.`
+        );
+      }
+      return { ...line, itemId: targetErpId };
     });
 
     const storeNote = request.preferredStore ? ` | Tercih Edilen Mağaza: ${request.preferredStore.name}` : '';

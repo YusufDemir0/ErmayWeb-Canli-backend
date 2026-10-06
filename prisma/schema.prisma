@@ -38,6 +38,14 @@ enum PaymentChannel {
   IN_STORE
 }
 
+/// ERP'de karşılığı olmayan web ürünlerinin bağlandığı ERP deneme ürünü (ERP kodu DNM-<değer>)
+enum ErpPlaceholder {
+  MOBILYA
+  TAKIM
+  KOLTUK
+  MASA
+}
+
 enum ErpSyncStatus {
   PENDING
   IN_PROGRESS
@@ -122,6 +130,9 @@ model Product {
   isPublished     Boolean   @default(false)
   lastSyncedAt    DateTime?
   erpMissingSince DateTime?
+  /// ERP'de karşılığı yoksa talepler bu deneme ürünle ERP'ye aktarılır (admin kabulüyle)
+  erpPlaceholder      ErpPlaceholder?
+  erpPlaceholderAckAt DateTime?
   archivedAt      DateTime?
   
   createdAt       DateTime  @default(now())

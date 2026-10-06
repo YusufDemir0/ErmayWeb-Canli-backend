@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   CreateStoreSchema,
   CreateProductSchema,
+  UpdateProductSchema,
   CreateOrderRequestSchema,
   ProductListQuerySchema,
   CMS_SCHEMAS,
@@ -156,5 +157,24 @@ describe('Validation: Turkish phone numbers (E.164 +90)', () => {
       assert.equal((r.data as { whatsapp: string }).whatsapp, '905324194151');
       assert.equal((r.data as { phone: string }).phone, '+902163650000');
     }
+  });
+});
+
+describe('Validation: ERP placeholder consent', () => {
+  const base = { name: 'Lizbon Kanepe', price: 21500, category: 'kanepe-takimlari' };
+  test('product without ERP match needs placeholder + explicit consent', () => {
+    assert.equal(CreateProductSchema.safeParse(base).success, false);
+    assert.equal(CreateProductSchema.safeParse({ ...base, erpPlaceholder: 'KOLTUK' }).success, false);
+    assert.equal(CreateProductSchema.safeParse({ ...base, erpPlaceholder: 'KOLTUK', erpPlaceholderAck: false }).success, false);
+    assert.equal(CreateProductSchema.safeParse({ ...base, erpPlaceholder: 'SANDALYE', erpPlaceholderAck: true }).success, false);
+    assert.equal(CreateProductSchema.safeParse({ ...base, erpPlaceholder: 'KOLTUK', erpPlaceholderAck: true }).success, true);
+  });
+  test('ERP-matched product needs no consent', () => {
+    assert.equal(CreateProductSchema.safeParse({ ...base, erpItemId: '412' }).success, true);
+  });
+  test('changing placeholder on update requires consent again', () => {
+    assert.equal(UpdateProductSchema.safeParse({ erpPlaceholder: 'MASA' }).success, false);
+    assert.equal(UpdateProductSchema.safeParse({ erpPlaceholder: 'MASA', erpPlaceholderAck: true }).success, true);
+    assert.equal(UpdateProductSchema.safeParse({ erpPlaceholder: null }).success, true);
   });
 });

@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 /**
  * Web'de kürasyonu yapılan (ERP depo listesinde karşılığı OLMAYAN) ürünlerin ERP ID önekleri.
  * Bu ürünler katalog senkronunda ERP'de aranmaz ve ERP'ye satış olarak gönderilemez.
@@ -6,6 +8,18 @@ export const CURATED_ERP_PREFIXES = ['ERM-', 'WEB-', 'ATELIER-'];
 
 export function isCuratedErpId(erpItemId: string): boolean {
   return CURATED_ERP_PREFIXES.some((prefix) => erpItemId.startsWith(prefix));
+}
+
+/**
+ * ERP'de karşılığı olmayan web ürünlerinin bağlanabildiği ERP deneme ürünleri (ERP kodu `DNM-<değer>`).
+ * Admin kabulüyle seçilir; talep ERP'ye bu ürünle, gerçek ad satır açıklamasında ve web fiyatıyla düşer.
+ */
+export const ERP_PLACEHOLDERS = ['MOBILYA', 'TAKIM', 'KOLTUK', 'MASA'] as const;
+export type ErpPlaceholderValue = (typeof ERP_PLACEHOLDERS)[number];
+
+/** Yeni ERP'siz ürün için web kürasyon kimliği (erpItemId tekil ve zorunludur). */
+export function newCuratedErpId(): string {
+  return `WEB-${randomUUID()}`;
 }
 
 /** ERP'nin HTTP hata yanıtı (durum kodu korunur ki kalıcı / geçici hata ayrımı yapılabilsin). */

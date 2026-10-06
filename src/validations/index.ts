@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { normalizeTurkishPhone } from './request.validation';
+import { ERP_PLACEHOLDERS } from '../utils/erp';
 import { TURKEY_PROVINCE_NAMES, isDistrictOf } from './provinces';
 import {
   line,
@@ -117,17 +118,28 @@ const ProductFields = z.object({
   leadTimeDays: optionalInt(0, 365, 'Teslim süresi'),
   unitCount: optionalInt(1, 1000, 'Parça adedi'),
   badge: optionalLine(40, 'Rozet'),
-  erpItemId: erpId,
+  // ERP'de karşılığı olmayan ürün: erpItemId gönderilmez, deneme ürün + kabul gönderilir (sunucu WEB- kimliği atar)
+  erpItemId: erpId.optional(),
   erpItemCode: z.union([z.string().trim().max(100), z.null()]).optional(),
+  erpPlaceholder: z.enum(ERP_PLACEHOLDERS).nullable().optional(),
+  erpPlaceholderAck: z.boolean().optional(),
 });
+
+const PLACEHOLDER_ACK_MESSAGE = 'ERP’de olmayan ürün için deneme ürün seçip bilgilendirme metnini kabul edin.';
 
 export const CreateProductSchema = ProductFields.refine(
   (v) => v.originalPrice == null || v.originalPrice > v.price,
   { message: 'Eski fiyat, satış fiyatından büyük olmalıdır.', path: ['originalPrice'] }
+).refine(
+  (v) => Boolean(v.erpItemId) || (Boolean(v.erpPlaceholder) && v.erpPlaceholderAck === true),
+  { message: PLACEHOLDER_ACK_MESSAGE, path: ['erpPlaceholder'] }
 );
 export const UpdateProductSchema = ProductFields.partial().refine(
   (v) => v.originalPrice == null || v.price === undefined || v.originalPrice > v.price,
   { message: 'Eski fiyat, satış fiyatından büyük olmalıdır.', path: ['originalPrice'] }
+).refine(
+  (v) => !v.erpPlaceholder || v.erpPlaceholderAck === true,
+  { message: PLACEHOLDER_ACK_MESSAGE, path: ['erpPlaceholder'] }
 );
 
 export const BulkLinkSchema = z.object({

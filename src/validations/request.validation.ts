@@ -106,7 +106,8 @@ export const CreateOrderRequestSchema = z.object({
   customerEmail: z
     .string()
     .trim()
-    .max(150, 'E-posta en fazla 150 karakter olabilir.')
+    // ERP cari e-posta kolonu 100 karakter; daha uzunu ERP'de kalıcı olarak reddedilir
+    .max(100, 'E-posta en fazla 100 karakter olabilir.')
     .email('Geçerli bir e-posta adresi giriniz.')
     .optional()
     .nullable()

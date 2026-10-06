@@ -6,7 +6,7 @@ import { prisma } from '../config/database';
 import { slugifyTurkish } from '../utils/slug';
 import { invalidateCachePattern } from '../utils/cache';
 import type { Product } from '@prisma/client';
-import { ErpHttpError } from '../utils/erp';
+import { ErpHttpError, type ErpPlaceholderValue } from '../utils/erp';
 import { logger, errorFields } from '../utils/logger';
 
 export interface ErpItem {
@@ -58,12 +58,12 @@ export interface CatalogItem {
   } | null;
 }
 
-export interface ErpOrderItemInput {
-  itemId: string;
+/** Satırda ya `itemId` (ERP ürünü) ya da `placeholder` (ERP'de karşılığı olmayan ürün için deneme ürün) bulunur. */
+export type ErpOrderItemInput = {
   quantity: number;
   price: number;
   name: string;
-}
+} & ({ itemId: string; placeholder?: never } | { placeholder: ErpPlaceholderValue; itemId?: never });
 
 export interface ErpWebOrderInput {
   externalRef?: string;
@@ -358,8 +358,8 @@ export class ErpIntegrationService {
           images: cleanImages,
           categoryId: targetCatId,
           description: description || erpItem.description || '',
-          dimensions: dimensions || 'G: Standart | D: Standart | Y: Standart',
-          material: material || 'Lüks Ermay Mobilya Atölye Üretimi',
+          dimensions: dimensions || '',
+          material: material || '',
           erpItemId: String(erpItemId),
           erpItemCode: erpItem.code,
           lastSyncedAt: new Date(),

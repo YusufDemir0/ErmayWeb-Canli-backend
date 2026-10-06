@@ -6,6 +6,7 @@ import { slugifyTurkish } from '../utils/slug';
 import { getOrSetCache, invalidateCachePattern } from '../utils/cache';
 import { erpIntegrationService } from '../services/erpIntegration.service';
 import { logger, errorFields } from '../utils/logger';
+import { isCuratedErpId, newCuratedErpId, type ErpPlaceholderValue } from '../utils/erp';
 
 /**
  * Tek ve merkezi yayınlanabilirlik kuralı (canPublish).
@@ -228,8 +229,10 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       images,
       features,
       colors,
-      erpItemId,
+      erpItemId: requestedErpItemId,
       erpItemCode,
+      erpPlaceholder,
+      erpPlaceholderAck,
       widthCm,
       heightCm,
       depthCm,
@@ -245,13 +248,18 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       return;
     }
 
-    if (!erpItemId || String(erpItemId).trim() === '') {
+    // ERP eşleşmesi yoksa yalnız deneme ürün kabulüyle eklenir; ürüne web kürasyon kimliği verilir
+    const hasErpMatch = Boolean(requestedErpItemId && String(requestedErpItemId).trim() !== '');
+    if (!hasErpMatch && !(erpPlaceholder && erpPlaceholderAck === true)) {
       res.status(400).json({
         success: false,
-        message: 'CRM ERP sisteminde bulunmayan veya ERP ID (erpItemId) eşleşmesi yapılmamış ürün eklenemez.',
+        message: 'ERP’de karşılığı olmayan ürün için deneme ürün seçip bilgilendirme metnini kabul edin.',
+        errors: [{ field: 'erpPlaceholder', message: 'Deneme ürün seçip kabul edin.' }],
       });
       return;
     }
+    const erpItemId = hasErpMatch ? String(requestedErpItemId) : newCuratedErpId();
+    const usesPlaceholder = !hasErpMatch || isCuratedErpId(erpItemId);
 
     let catId = categoryId;
     const catSearch = typeof category === 'object' && category !== null ? (category as { id?: string; slug?: string }).id || (category as { id?: string; slug?: string }).slug : category;
@@ -326,8 +334,11 @@ export async function createProduct(req: Request, res: Response): Promise<void> 
       drawerCount: drawerCount != null ? Number(drawerCount) : null,
       leadTimeDays: leadTimeDays != null ? Number(leadTimeDays) : null,
       vatRate: vatRate !== undefined ? parseFloat(String(vatRate)) : 0.20,
-      erpItemId: String(erpItemId),
-      erpItemCode: erpItemCode || null,
+      erpItemId,
+      erpItemCode: hasErpMatch ? erpItemCode || null : null,
+      // Deneme ürün yalnız ERP karşılığı olmayan (kürasyon) ürünlerde anlamlıdır
+      erpPlaceholder: usesPlaceholder && erpPlaceholder && erpPlaceholderAck === true ? erpPlaceholder : null,
+      erpPlaceholderAckAt: usesPlaceholder && erpPlaceholder && erpPlaceholderAck === true ? new Date() : null,
       isPublished: targetPublish,
     };
 
@@ -414,6 +425,24 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
       resolvedCategoryId = found.id;
     }
 
+    // Deneme ürün eşlemesi yalnız ERP karşılığı olmayan ürünlerde değiştirilebilir; seçim her seferinde yeniden kabul ister
+    let placeholderUpdate: { erpPlaceholder?: ErpPlaceholderValue | null; erpPlaceholderAckAt?: Date | null } = {};
+    if (body.erpPlaceholder !== undefined) {
+      if (!isCuratedErpId(existing.erpItemId)) {
+        res.status(400).json({
+          success: false,
+          message: 'Bu ürün ERP’de eşleşmiş; deneme ürün yalnız ERP’de karşılığı olmayan ürünlere atanabilir.',
+          errors: [{ field: 'erpPlaceholder', message: 'ERP’de eşleşmiş üründe deneme ürün kullanılamaz.' }],
+        });
+        return;
+      }
+      placeholderUpdate = body.erpPlaceholder
+        ? body.erpPlaceholder === existing.erpPlaceholder
+          ? {}
+          : { erpPlaceholder: body.erpPlaceholder, erpPlaceholderAckAt: new Date() }
+        : { erpPlaceholder: null, erpPlaceholderAckAt: null };
+    }
+
     const cleanUpdateColors = body.colors !== undefined
       ? (Array.isArray(body.colors)
           ? body.colors
@@ -454,6 +483,7 @@ export async function updateProduct(req: Request, res: Response): Promise<void> 
         ...(body.leadTimeDays !== undefined && { leadTimeDays: body.leadTimeDays === null ? null : Number(body.leadTimeDays) }),
         ...(body.vatRate !== undefined && { vatRate: parseFloat(String(body.vatRate)) }),
         ...(body.erpItemCode !== undefined && { erpItemCode: body.erpItemCode }),
+        ...placeholderUpdate,
         isPublished,
       },
     });
@@ -586,9 +616,10 @@ export async function bulkLinkErpProducts(req: Request, res: Response): Promise<
             inStock: erpInfo.erpStock > 0,
             image,
             images,
-            description: `${prodName} - Ermay Mobilya Atölye Üretimi`,
-            material: 'Lüks Ermay Mobilya Atölye Üretimi',
-            dimensions: 'G: Standart | D: Standart | Y: Standart',
+            // Açıklama/malzeme/ölçü admin'den girilir; uydurma varsayılan yazılmaz
+            description: '',
+            material: '',
+            dimensions: '',
             isPublished: canPublish,
             lastSyncedAt: new Date(),
           },
